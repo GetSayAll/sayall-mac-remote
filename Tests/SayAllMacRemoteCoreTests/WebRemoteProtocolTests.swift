@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import RemoteMic
+@testable import SayAllMacRemoteCore
 
 @Suite("Mobile Web remote protocol")
 struct WebRemoteProtocolTests {

@@ -58,8 +58,9 @@ enum PhoneRemoteIdentityVerifier {
     }
 }
 
-final class PhoneRemoteServer {
-    typealias ApprovalHandler = (String, String, String?, @escaping (Bool) -> Void) -> Void
+public final class PhoneRemoteServer: @unchecked Sendable {
+    public typealias ApprovalHandler = (String, String, String?, @escaping (Bool) -> Void) -> Void
+    public typealias LogHandler = @Sendable (String) -> Void
 
     static func shouldReplaceExistingClient(
         existingIsApproved: Bool,
@@ -72,24 +73,29 @@ final class PhoneRemoteServer {
     private var listener: NWListener?
     private var clients: [ObjectIdentifier: Client] = [:]
     private var buttonTitles: [String: String] = [:]
+    private let logger: LogHandler
 
-    var onApprovalRequested: ApprovalHandler?
-    var onApprovalCancelled: (() -> Void)?
-    var isIdentityTrusted: ((String) -> Bool)?
-    var onCommand: ((RemoteButton, @escaping (Bool) -> Void) -> Void)?
-    var onButtonEvent: ((RemoteButton, RemoteButtonPhase, @escaping (Bool) -> Void) -> Void)?
-    var onButtonEventsReset: (() -> Void)?
-    var onVoiceStart: ((@escaping (Bool) -> Void) -> Void)?
-    var onVoiceStop: (() -> Void)?
-    var onAudio: (([Int16]) -> Void)?
+    public var onApprovalRequested: ApprovalHandler?
+    public var onApprovalCancelled: (() -> Void)?
+    public var isIdentityTrusted: ((String) -> Bool)?
+    public var onCommand: ((RemoteButton, @escaping (Bool) -> Void) -> Void)?
+    public var onButtonEvent: ((RemoteButton, RemoteButtonPhase, @escaping (Bool) -> Void) -> Void)?
+    public var onButtonEventsReset: (() -> Void)?
+    public var onVoiceStart: ((@escaping (Bool) -> Void) -> Void)?
+    public var onVoiceStop: (() -> Void)?
+    public var onAudio: (([Int16]) -> Void)?
 
-    func start() {
+    public init(logger: @escaping LogHandler = { _ in }) {
+        self.logger = logger
+    }
+
+    public func start() {
         queue.async { [weak self] in
             self?.startOnQueue()
         }
     }
 
-    func stop() {
+    public func stop() {
         queue.async { [weak self] in
             guard let self else { return }
             listener?.cancel()
@@ -100,7 +106,7 @@ final class PhoneRemoteServer {
         }
     }
 
-    func updateButtonTitles(_ titles: [String: String]) {
+    public func updateButtonTitles(_ titles: [String: String]) {
         queue.async { [weak self] in
             guard let self else { return }
             buttonTitles = titles
@@ -118,12 +124,12 @@ final class PhoneRemoteServer {
                 name: Self.macName,
                 type: "_remotemic._tcp"
             )
-            listener.stateUpdateHandler = { state in
+            listener.stateUpdateHandler = { [weak self] state in
                 switch state {
                 case .ready:
-                    AppLogger.shared.write("PHONE REMOTE listener_ready name=\(Self.macName)")
+                    self?.logger("PHONE REMOTE listener_ready name=\(Self.macName)")
                 case let .failed(error):
-                    AppLogger.shared.write("PHONE REMOTE listener_failed error=\(error.localizedDescription)")
+                    self?.logger("PHONE REMOTE listener_failed error=\(error.localizedDescription)")
                 default:
                     break
                 }
@@ -134,7 +140,7 @@ final class PhoneRemoteServer {
             self.listener = listener
             listener.start(queue: queue)
         } catch {
-            AppLogger.shared.write("PHONE REMOTE listener_create_failed error=\(error.localizedDescription)")
+            logger("PHONE REMOTE listener_create_failed error=\(error.localizedDescription)")
         }
     }
 
@@ -151,7 +157,8 @@ final class PhoneRemoteServer {
             queue: queue,
             macName: Self.macName,
             appVersion: Self.appVersion,
-            buttonTitles: buttonTitles
+            buttonTitles: buttonTitles,
+            logger: logger
         )
         let identifier = ObjectIdentifier(client)
         clients[identifier] = client
@@ -233,6 +240,7 @@ private final class Client {
     private let queue: DispatchQueue
     private let macName: String
     private let appVersion: String?
+    private let logger: PhoneRemoteServer.LogHandler
     private var receiveBuffer = Data()
     private var isApproved = false
     private var isVoiceActive = false
@@ -263,13 +271,15 @@ private final class Client {
         queue: DispatchQueue,
         macName: String,
         appVersion: String?,
-        buttonTitles: [String: String]
+        buttonTitles: [String: String],
+        logger: @escaping PhoneRemoteServer.LogHandler
     ) {
         self.connection = connection
         self.queue = queue
         self.macName = macName
         self.appVersion = appVersion
         self.buttonTitles = buttonTitles
+        self.logger = logger
     }
 
     func start() {
@@ -296,12 +306,12 @@ private final class Client {
         if allowed {
             isApproved = true
             sendReady()
-            AppLogger.shared.write("PHONE REMOTE approved")
+            logger("PHONE REMOTE approved")
         } else {
             sendSecure(PhoneRemoteWireMessage(type: "denied")) { [weak self] in
                 self?.connection.cancel()
             }
-            AppLogger.shared.write("PHONE REMOTE denied")
+            logger("PHONE REMOTE denied")
         }
     }
 
@@ -420,7 +430,7 @@ private final class Client {
            isIdentityTrusted?(identityFingerprint) == true {
             isApproved = true
             sendReady()
-            AppLogger.shared.write("PHONE REMOTE trusted_identity_approved")
+            logger("PHONE REMOTE trusted_identity_approved")
             return
         }
         onApprovalRequested?(displayName, pairingCode, identityFingerprint)

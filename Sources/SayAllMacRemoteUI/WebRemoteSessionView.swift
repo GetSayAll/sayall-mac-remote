@@ -1,18 +1,52 @@
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import SayAllMacRemoteCore
 import SwiftUI
 
-struct WebRemoteSessionView: View {
-    @ObservedObject var model: BridgeAppModel
-    @EnvironmentObject private var localization: LocalizationStore
-    @Environment(\.dismiss) private var dismiss
+@MainActor
+public protocol WebRemoteSessionModel: ObservableObject {
+    var webRemoteState: WebRemoteSessionState { get }
 
-    var body: some View {
+    func enableWebRemoteConnection()
+    func disableWebRemoteConnection()
+}
+
+public struct WebRemoteSessionLocalization {
+    public let locale: Locale
+    private let resolve: (String) -> String
+
+    public init(
+        locale: Locale = .current,
+        text: @escaping (String) -> String
+    ) {
+        self.locale = locale
+        resolve = text
+    }
+
+    public func text(_ key: String) -> String {
+        resolve(key)
+    }
+}
+
+public struct WebRemoteSessionView<Model: WebRemoteSessionModel>: View {
+    @ObservedObject private var model: Model
+    @Environment(\.dismiss) private var dismiss
+    private let localization: WebRemoteSessionLocalization
+
+    public init(
+        model: Model,
+        localization: WebRemoteSessionLocalization
+    ) {
+        _model = ObservedObject(wrappedValue: model)
+        self.localization = localization
+    }
+
+    public var body: some View {
         VStack(spacing: 20) {
             VStack(spacing: 6) {
-                Text("connection.web.title")
+                Text(localization.text("connection.web.title"))
                     .font(.title2.bold())
-                Text("connection.web.sheet_help")
+                Text(localization.text("connection.web.sheet_help"))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -23,17 +57,20 @@ struct WebRemoteSessionView: View {
 
             HStack(spacing: 12) {
                 if model.webRemoteState.isEnabled {
-                    Button("connection.web.disconnect", role: .destructive) {
+                    Button(
+                        localization.text("connection.web.disconnect"),
+                        role: .destructive
+                    ) {
                         model.disableWebRemoteConnection()
                     }
                     .buttonStyle(.bordered)
                 } else {
-                    Button("connection.web.retry") {
+                    Button(localization.text("connection.web.retry")) {
                         model.enableWebRemoteConnection()
                     }
                     .buttonStyle(.borderedProminent)
                 }
-                Button("common.action.close") { dismiss() }
+                Button(localization.text("common.action.close")) { dismiss() }
                     .buttonStyle(.bordered)
             }
         }
@@ -62,9 +99,9 @@ struct WebRemoteSessionView: View {
             VStack(spacing: 16) {
                 ProgressView()
                     .controlSize(.large)
-                Text("connection.web.connecting")
+                Text(localization.text("connection.web.connecting"))
                     .font(.headline)
-                Text("connection.web.connecting_help")
+                Text(localization.text("connection.web.connecting_help"))
                     .foregroundStyle(.secondary)
             }
         case let .waitingForPhone(joinURL, pairingCode, expiresAt):
@@ -77,21 +114,13 @@ struct WebRemoteSessionView: View {
             qrContent(
                 joinURL: joinURL,
                 pairingCode: pairingCode,
-                detail: String(
-                    format: localization.text("connection.web.awaiting_approval"),
-                    locale: localization.locale,
-                    arguments: [deviceName]
-                )
+                detail: localizedFormat("connection.web.awaiting_approval", deviceName)
             )
         case let .connected(deviceName):
             statusContent(
                 systemImage: "checkmark.circle.fill",
                 title: localization.text("connection.web.connected"),
-                detail: String(
-                    format: localization.text("connection.web.connected_device"),
-                    locale: localization.locale,
-                    arguments: [deviceName]
-                ),
+                detail: localizedFormat("connection.web.connected_device", deviceName),
                 tint: .green
             )
         case let .failed(detail):
@@ -111,27 +140,26 @@ struct WebRemoteSessionView: View {
                     .interpolation(.none)
                     .resizable()
                     .frame(width: 250, height: 250)
-                    .accessibilityLabel("connection.web.qr_accessibility")
+                    .accessibilityLabel(localization.text("connection.web.qr_accessibility"))
             }
-            Text("connection.web.scan")
+            Text(localization.text("connection.web.scan"))
                 .font(.headline)
             VStack(spacing: 4) {
-                Text("connection.web.pairing_code")
-                    .font(.caption)
+                Text(localization.text("connection.web.pairing_code"))
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                 Text(pairingCode.map(String.init).joined(separator: " "))
                     .font(.system(size: 28, weight: .bold, design: .monospaced))
                     .foregroundStyle(.orange)
                     .accessibilityLabel(
-                        String(
-                            format: localization.text("connection.web.pairing_code_accessibility"),
-                            locale: localization.locale,
-                            arguments: [pairingCode]
+                        localizedFormat(
+                            "connection.web.pairing_code_accessibility",
+                            pairingCode
                         )
                     )
             }
             Text(detail)
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
@@ -162,10 +190,14 @@ struct WebRemoteSessionView: View {
         formatter.locale = localization.locale
         formatter.unitsStyle = .full
         let relative = formatter.localizedString(for: date, relativeTo: Date())
-        return String(
-            format: localization.text("connection.web.expires"),
+        return localizedFormat("connection.web.expires", relative)
+    }
+
+    private func localizedFormat(_ key: String, _ argument: String) -> String {
+        String(
+            format: localization.text(key),
             locale: localization.locale,
-            arguments: [relative]
+            arguments: [argument]
         )
     }
 }
@@ -175,12 +207,17 @@ private enum QRCodeRenderer {
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(value.utf8)
         filter.correctionLevel = "M"
-        guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 10, y: 10)),
-              let cgImage = CIContext(options: [.useSoftwareRenderer: false]).createCGImage(
-                  output,
-                  from: output.extent
-              )
+        guard let output = filter.outputImage?.transformed(
+            by: CGAffineTransform(scaleX: 10, y: 10)
+        ),
+        let cgImage = CIContext(options: [.useSoftwareRenderer: false]).createCGImage(
+            output,
+            from: output.extent
+        )
         else { return nil }
-        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        return NSImage(
+            cgImage: cgImage,
+            size: NSSize(width: cgImage.width, height: cgImage.height)
+        )
     }
 }

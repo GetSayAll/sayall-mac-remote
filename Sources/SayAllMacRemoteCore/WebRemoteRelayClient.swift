@@ -1,7 +1,7 @@
 import Foundation
 
-final class WebRemoteRelayClient: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
-    typealias ApprovalHandler = (String, String, @escaping (Bool) -> Void) -> Void
+public final class WebRemoteRelayClient: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
+    public typealias ApprovalHandler = (String, String, @escaping (Bool) -> Void) -> Void
 
     private let queue = DispatchQueue(label: "RemoteMic.webRemote", qos: .userInitiated)
     private let delegateQueue: OperationQueue = {
@@ -28,17 +28,21 @@ final class WebRemoteRelayClient: NSObject, URLSessionWebSocketDelegate, @unchec
     private var audioTimer: DispatchSourceTimer?
     private var stopped = true
 
-    var onStateChange: ((WebRemoteSessionState) -> Void)?
-    var onApprovalRequested: ApprovalHandler?
-    var onApprovalCancelled: (() -> Void)?
-    var onCommand: ((RemoteButton, @escaping (Bool) -> Void) -> Void)?
-    var onButtonEvent: ((RemoteButton, RemoteButtonPhase, @escaping (Bool) -> Void) -> Void)?
-    var onButtonEventsReset: (() -> Void)?
-    var onVoiceStart: ((@escaping (Bool) -> Void) -> Void)?
-    var onVoiceStop: (() -> Void)?
-    var onAudio: (([Int16]) -> Void)?
+    public var onStateChange: ((WebRemoteSessionState) -> Void)?
+    public var onApprovalRequested: ApprovalHandler?
+    public var onApprovalCancelled: (() -> Void)?
+    public var onCommand: ((RemoteButton, @escaping (Bool) -> Void) -> Void)?
+    public var onButtonEvent: ((RemoteButton, RemoteButtonPhase, @escaping (Bool) -> Void) -> Void)?
+    public var onButtonEventsReset: (() -> Void)?
+    public var onVoiceStart: ((@escaping (Bool) -> Void) -> Void)?
+    public var onVoiceStop: (() -> Void)?
+    public var onAudio: (([Int16]) -> Void)?
 
-    func start(
+    public override init() {
+        super.init()
+    }
+
+    public func start(
         relayURL: URL,
         macName: String,
         appVersion: String?,
@@ -70,7 +74,7 @@ final class WebRemoteRelayClient: NSObject, URLSessionWebSocketDelegate, @unchec
         }
     }
 
-    func stop() {
+    public func stop() {
         queue.async { [weak self] in
             guard let self else { return }
             if !stopped {
@@ -80,7 +84,7 @@ final class WebRemoteRelayClient: NSObject, URLSessionWebSocketDelegate, @unchec
         }
     }
 
-    func updateButtonTitles(_ titles: [String: String]) {
+    public func updateButtonTitles(_ titles: [String: String]) {
         queue.async { [weak self] in
             guard let self else { return }
             buttonTitles = titles
@@ -89,7 +93,7 @@ final class WebRemoteRelayClient: NSObject, URLSessionWebSocketDelegate, @unchec
         }
     }
 
-    func urlSession(
+    public func urlSession(
         _ session: URLSession,
         webSocketTask: URLSessionWebSocketTask,
         didOpenWithProtocol protocol: String?
@@ -110,7 +114,7 @@ final class WebRemoteRelayClient: NSObject, URLSessionWebSocketDelegate, @unchec
         }
     }
 
-    func urlSession(
+    public func urlSession(
         _ session: URLSession,
         webSocketTask: URLSessionWebSocketTask,
         didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
@@ -122,7 +126,7 @@ final class WebRemoteRelayClient: NSObject, URLSessionWebSocketDelegate, @unchec
         }
     }
 
-    func urlSession(
+    public func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
         didCompleteWithError error: Error?

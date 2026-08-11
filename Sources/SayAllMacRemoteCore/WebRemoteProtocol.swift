@@ -70,11 +70,11 @@ enum WebRemoteAudioFrame {
     }
 }
 
-enum WebRemoteConfiguration {
-    static let infoDictionaryKey = "RemoteWebRelayURL"
-    static let environmentKey = "REMOTE_WEB_RELAY_URL"
+public enum WebRemoteConfiguration {
+    public static let infoDictionaryKey = "RemoteWebRelayURL"
+    public static let environmentKey = "REMOTE_WEB_RELAY_URL"
 
-    static func relayURL(
+    public static func relayURL(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         infoDictionary: [String: Any] = Bundle.main.infoDictionary ?? [:]
     ) -> URL? {
@@ -84,7 +84,7 @@ enum WebRemoteConfiguration {
         return validatedRelayURL(rawValue)
     }
 
-    static func validatedRelayURL(_ rawValue: String) -> URL? {
+    public static func validatedRelayURL(_ rawValue: String) -> URL? {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty,
               let url = URL(string: value),
@@ -101,7 +101,7 @@ enum WebRemoteConfiguration {
     }
 }
 
-enum WebRemoteSessionState: Equatable {
+public enum WebRemoteSessionState: Equatable, Sendable {
     case disabled
     case unavailable
     case connecting
@@ -110,7 +110,7 @@ enum WebRemoteSessionState: Equatable {
     case connected(deviceName: String)
     case failed(String)
 
-    var isEnabled: Bool {
+    public var isEnabled: Bool {
         switch self {
         case .disabled, .unavailable, .failed:
             return false
@@ -119,7 +119,7 @@ enum WebRemoteSessionState: Equatable {
         }
     }
 
-    var joinURL: URL? {
+    public var joinURL: URL? {
         switch self {
         case let .waitingForPhone(joinURL, _, _), let .awaitingApproval(joinURL, _, _):
             return joinURL
@@ -128,7 +128,7 @@ enum WebRemoteSessionState: Equatable {
         }
     }
 
-    var pairingCode: String? {
+    public var pairingCode: String? {
         switch self {
         case let .waitingForPhone(_, pairingCode, _), let .awaitingApproval(_, pairingCode, _):
             return pairingCode
