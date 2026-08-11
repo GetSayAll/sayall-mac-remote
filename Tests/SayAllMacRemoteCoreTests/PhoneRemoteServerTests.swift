@@ -1,25 +1,24 @@
 import Foundation
-import Testing
+import XCTest
 @testable import SayAllMacRemoteCore
 
-@Suite("Phone remote server")
-struct PhoneRemoteServerTests {
-    @Test func authenticatedReconnectSafelyReplacesStaleSession() {
-        #expect(PhoneRemoteServer.shouldReplaceExistingClient(
+final class PhoneRemoteServerTests: XCTestCase {
+    func testAuthenticatedReconnectSafelyReplacesStaleSession() {
+        XCTAssertTrue(PhoneRemoteServer.shouldReplaceExistingClient(
             existingIsApproved: false,
             newIsApproved: false
         ))
-        #expect(!PhoneRemoteServer.shouldReplaceExistingClient(
+        XCTAssertFalse(PhoneRemoteServer.shouldReplaceExistingClient(
             existingIsApproved: true,
             newIsApproved: false
         ))
-        #expect(PhoneRemoteServer.shouldReplaceExistingClient(
+        XCTAssertTrue(PhoneRemoteServer.shouldReplaceExistingClient(
             existingIsApproved: true,
             newIsApproved: true
         ))
     }
 
-    @Test func buttonEventCapabilityAndPhaseRoundTrip() throws {
+    func testButtonEventCapabilityAndPhaseRoundTrip() throws {
         let original = PhoneRemoteWireMessage(
             type: "buttonEvent",
             command: RemoteButton.power.rawValue,
@@ -30,9 +29,9 @@ struct PhoneRemoteServerTests {
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(PhoneRemoteWireMessage.self, from: data)
 
-        #expect(decoded.type == "buttonEvent")
-        #expect(decoded.command == RemoteButton.power.rawValue)
-        #expect(decoded.capabilities == [PhoneRemoteWireMessage.buttonEventsCapability])
-        #expect(decoded.buttonPhase == RemoteButtonPhase.press.rawValue)
+        XCTAssertEqual(decoded.type, "buttonEvent")
+        XCTAssertEqual(decoded.command, RemoteButton.power.rawValue)
+        XCTAssertEqual(decoded.capabilities, [PhoneRemoteWireMessage.buttonEventsCapability])
+        XCTAssertEqual(decoded.buttonPhase, RemoteButtonPhase.press.rawValue)
     }
 }

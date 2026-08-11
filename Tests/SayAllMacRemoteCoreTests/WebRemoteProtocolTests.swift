@@ -1,10 +1,9 @@
 import Foundation
-import Testing
+import XCTest
 @testable import SayAllMacRemoteCore
 
-@Suite("Mobile Web remote protocol")
-struct WebRemoteProtocolTests {
-    @Test func buttonEventCapabilityAndPhaseRoundTrip() throws {
+final class WebRemoteProtocolTests: XCTestCase {
+    func testButtonEventCapabilityAndPhaseRoundTrip() throws {
         let original = WebRemoteWireMessage(
             type: "buttonEvent",
             command: RemoteButton.power.rawValue,
@@ -15,67 +14,67 @@ struct WebRemoteProtocolTests {
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(WebRemoteWireMessage.self, from: data)
 
-        #expect(decoded.type == "buttonEvent")
-        #expect(decoded.command == RemoteButton.power.rawValue)
-        #expect(decoded.capabilities == [WebRemoteWireMessage.buttonEventsCapability])
-        #expect(decoded.buttonPhase == RemoteButtonPhase.press.rawValue)
+        XCTAssertEqual(decoded.type, "buttonEvent")
+        XCTAssertEqual(decoded.command, RemoteButton.power.rawValue)
+        XCTAssertEqual(decoded.capabilities, [WebRemoteWireMessage.buttonEventsCapability])
+        XCTAssertEqual(decoded.buttonPhase, RemoteButtonPhase.press.rawValue)
     }
 
-    @Test func productionRelayRequiresSecureWebSocketAndFixedPath() throws {
-        #expect(WebRemoteConfiguration.validatedRelayURL("wss://example.com/ws") != nil)
-        #expect(WebRemoteConfiguration.validatedRelayURL("https://example.com/ws") == nil)
-        #expect(WebRemoteConfiguration.validatedRelayURL("ws://example.com/ws") == nil)
-        #expect(WebRemoteConfiguration.validatedRelayURL("wss://example.com/other") == nil)
-        #expect(WebRemoteConfiguration.validatedRelayURL("wss://example.com/ws?token=value") == nil)
-        #expect(WebRemoteConfiguration.validatedRelayURL("ws://127.0.0.1/ws") != nil)
+    func testProductionRelayRequiresSecureWebSocketAndFixedPath() {
+        XCTAssertNotNil(WebRemoteConfiguration.validatedRelayURL("wss://example.com/ws"))
+        XCTAssertNil(WebRemoteConfiguration.validatedRelayURL("https://example.com/ws"))
+        XCTAssertNil(WebRemoteConfiguration.validatedRelayURL("ws://example.com/ws"))
+        XCTAssertNil(WebRemoteConfiguration.validatedRelayURL("wss://example.com/other"))
+        XCTAssertNil(WebRemoteConfiguration.validatedRelayURL("wss://example.com/ws?token=value"))
+        XCTAssertNotNil(WebRemoteConfiguration.validatedRelayURL("ws://127.0.0.1/ws"))
     }
 
-    @Test func environmentConfigurationTakesPriorityOverBundleConfiguration() throws {
-        let url = try #require(WebRemoteConfiguration.relayURL(
+    func testEnvironmentConfigurationTakesPriorityOverBundleConfiguration() throws {
+        let url = try XCTUnwrap(WebRemoteConfiguration.relayURL(
             environment: [WebRemoteConfiguration.environmentKey: "wss://environment.example/ws"],
             infoDictionary: [WebRemoteConfiguration.infoDictionaryKey: "wss://bundle.example/ws"]
         ))
-        #expect(url.host == "environment.example")
+        XCTAssertEqual(url.host, "environment.example")
     }
 
-    @Test func missingProductionConfigurationDoesNotCreateARelayURL() {
-        #expect(WebRemoteConfiguration.relayURL(
+    func testMissingProductionConfigurationDoesNotCreateRelayURL() {
+        XCTAssertNil(WebRemoteConfiguration.relayURL(
             environment: [:],
             infoDictionary: [:]
-        ) == nil)
+        ))
     }
 
-    @Test func audioFrameDecodesSequenceAndLittleEndianSamples() throws {
+    func testAudioFrameDecodesSequenceAndLittleEndianSamples() throws {
         let data = Data([
             WebRemoteAudioFrame.type,
             0x01, 0x02, 0x03, 0x04,
             0x01, 0x00,
             0xFE, 0xFF,
         ])
-        let frame = try #require(WebRemoteAudioFrame.decode(data))
-        #expect(frame.sequence == 0x0102_0304)
-        #expect(frame.samples == [1, -2])
+        let frame = try XCTUnwrap(WebRemoteAudioFrame.decode(data))
+        XCTAssertEqual(frame.sequence, 0x0102_0304)
+        XCTAssertEqual(frame.samples, [1, -2])
     }
 
-    @Test func audioFrameRejectsMalformedPayloads() {
-        #expect(WebRemoteAudioFrame.decode(Data()) == nil)
-        #expect(WebRemoteAudioFrame.decode(Data([2, 0, 0, 0, 1, 0, 0])) == nil)
-        #expect(WebRemoteAudioFrame.decode(Data([1, 0, 0, 0, 1, 0])) == nil)
+    func testAudioFrameRejectsMalformedPayloads() {
+        XCTAssertNil(WebRemoteAudioFrame.decode(Data()))
+        XCTAssertNil(WebRemoteAudioFrame.decode(Data([2, 0, 0, 0, 1, 0, 0])))
+        XCTAssertNil(WebRemoteAudioFrame.decode(Data([1, 0, 0, 0, 1, 0])))
     }
 
-    @Test func jitterBufferWaitsForInitialFramesAndPlaysInSequence() throws {
+    func testJitterBufferWaitsForInitialFramesAndPlaysInSequence() {
         var buffer = WebRemoteAudioJitterBuffer(startFrameCount: 2, maximumFrameCount: 4)
         buffer.append(sequence: 10, samples: [10])
-        #expect(buffer.nextFrame(finishing: false) == nil)
+        XCTAssertNil(buffer.nextFrame(finishing: false))
         buffer.append(sequence: 11, samples: [11])
-        #expect(buffer.nextFrame(finishing: false) == [10])
-        #expect(buffer.nextFrame(finishing: false) == [11])
+        XCTAssertEqual(buffer.nextFrame(finishing: false), [10])
+        XCTAssertEqual(buffer.nextFrame(finishing: false), [11])
     }
 
-    @Test func jitterBufferDrainsShortVoiceWhenFinishing() {
+    func testJitterBufferDrainsShortVoiceWhenFinishing() {
         var buffer = WebRemoteAudioJitterBuffer(startFrameCount: 8, maximumFrameCount: 40)
         buffer.append(sequence: 1, samples: [1, 2])
-        #expect(buffer.nextFrame(finishing: true) == [1, 2])
-        #expect(buffer.hasPendingFrames == false)
+        XCTAssertEqual(buffer.nextFrame(finishing: true), [1, 2])
+        XCTAssertFalse(buffer.hasPendingFrames)
     }
 }
