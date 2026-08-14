@@ -28,6 +28,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
     public var onButtonEvent: ((RemoteButton, RemoteButtonPhase, @escaping (Bool) -> Void) -> Void)?
     public var onButtonEventsReset: (() -> Void)?
     public var onVoiceStart: ((@escaping (Bool) -> Void) -> Void)?
+    public var onVoiceStartResult: ((@escaping (RemoteVoiceStartResult) -> Void) -> Void)?
     public var onVoiceStop: (() -> Void)?
     public var onAudio: (([Int16]) -> Void)?
 
@@ -123,12 +124,16 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
                 if !success { self?.send(WatchBluetoothMessage(type: "error", detail: "button")) }
             }
         case "voiceStart":
-            guard approved, !voiceActive, let onVoiceStart else { return }
-            onVoiceStart { [weak self] success in
+            guard approved else { return }
+            guard !voiceActive else {
+                sendVoiceStartError(.busy)
+                return
+            }
+            requestVoiceStart { [weak self] result in
                 guard let self else { return }
                 queue.async {
-                    if success { self.voiceActive = true }
-                    else { self.send(WatchBluetoothMessage(type: "error", detail: "voice_start")) }
+                    if result == .started { self.voiceActive = true }
+                    else { self.sendVoiceStartError(result) }
                 }
             }
         case "voiceStop":
@@ -188,6 +193,23 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
             capabilities: [WatchBluetoothProtocol.buttonEventsCapability,
                            WatchBluetoothProtocol.compressedAudioCapability]
         ))
+    }
+
+    private func requestVoiceStart(
+        completion: @escaping (RemoteVoiceStartResult) -> Void
+    ) {
+        if let onVoiceStartResult {
+            onVoiceStartResult(completion)
+        } else if let onVoiceStart {
+            onVoiceStart { completion($0 ? .started : .unavailable) }
+        } else {
+            completion(.unavailable)
+        }
+    }
+
+    private func sendVoiceStartError(_ result: RemoteVoiceStartResult) {
+        guard let detail = result.wireErrorDetail else { return }
+        send(WatchBluetoothMessage(type: "error", detail: detail))
     }
 
     private func send(_ message: WatchBluetoothMessage) {

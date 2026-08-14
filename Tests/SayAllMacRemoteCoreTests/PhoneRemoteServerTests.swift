@@ -48,6 +48,15 @@ final class PhoneRemoteServerTests: XCTestCase {
         XCTAssertEqual(decoded.buttonPhase, RemoteButtonPhase.press.rawValue)
     }
 
+    func testVoiceStartResultUsesStableErrorDetails() {
+        XCTAssertNil(RemoteVoiceStartResult.started.wireErrorDetail)
+        XCTAssertEqual(RemoteVoiceStartResult.busy.wireErrorDetail, "voice_busy")
+        XCTAssertEqual(
+            RemoteVoiceStartResult.unavailable.wireErrorDetail,
+            "voice_output_unavailable"
+        )
+    }
+
     func testBonjourPublicationWatchdogOnlyRestartsCurrentUnpublishedListener() {
         XCTAssertTrue(PhoneRemoteServer.shouldRestartAfterRegistrationTimeout(
             isRunning: true,
