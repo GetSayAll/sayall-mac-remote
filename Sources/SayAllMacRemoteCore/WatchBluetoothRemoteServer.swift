@@ -1,0 +1,280 @@
+import CoreBluetooth
+import CryptoKit
+import Foundation
+
+public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
+    public typealias ApprovalHandler = (String, String, String?, @escaping (Bool) -> Void) -> Void
+    public typealias LogHandler = @Sendable (String) -> Void
+
+    private let queue = DispatchQueue(label: "RemoteMic.watchBluetooth", qos: .userInitiated)
+    private let logger: LogHandler
+    private var manager: CBPeripheralManager?
+    private var writeCharacteristic: CBMutableCharacteristic?
+    private var notifyCharacteristic: CBMutableCharacteristic?
+    private var subscribedCentral: CBCentral?
+    private var approved = false
+    private var requestedApproval = false
+    private var voiceActive = false
+    private var identityFingerprint: String?
+    private var pendingPairingCode: String?
+    private var buttonTitles: [String: String] = [:]
+    private var audioFrames: [UInt16: AudioFrame] = [:]
+
+    public var onApprovalRequested: ApprovalHandler?
+    public var onApprovalCancelled: (() -> Void)?
+    public var isIdentityTrusted: ((String) -> Bool)?
+    public var onCommand: ((RemoteButton, @escaping (Bool) -> Void) -> Void)?
+    public var onButtonEvent: ((RemoteButton, RemoteButtonPhase, @escaping (Bool) -> Void) -> Void)?
+    public var onButtonEventsReset: (() -> Void)?
+    public var onVoiceStart: ((@escaping (Bool) -> Void) -> Void)?
+    public var onVoiceStop: (() -> Void)?
+    public var onAudio: (([Int16]) -> Void)?
+
+    public init(logger: @escaping LogHandler = { _ in }) {
+        self.logger = logger
+        super.init()
+    }
+
+    public func start() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard manager == nil else { return }
+            manager = CBPeripheralManager(delegate: self, queue: queue)
+            logger("WATCH BLE starting")
+        }
+    }
+
+    public func stop() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            manager?.stopAdvertising()
+            manager?.removeAllServices()
+            manager = nil
+            subscribedCentral = nil
+            resetSession(notifyApproval: false)
+            logger("WATCH BLE stopped")
+        }
+    }
+
+    public func updateButtonTitles(_ titles: [String: String]) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            buttonTitles = titles
+            if approved { sendReady() }
+        }
+    }
+
+    private func setupService() {
+        guard let manager, manager.state == .poweredOn else { return }
+        let serviceUUID = CBUUID(string: WatchBluetoothProtocol.serviceUUID)
+        let write = CBMutableCharacteristic(
+            type: CBUUID(string: WatchBluetoothProtocol.writeCharacteristicUUID),
+            properties: [.write, .writeWithoutResponse],
+            value: nil,
+            permissions: [.writeable]
+        )
+        let notify = CBMutableCharacteristic(
+            type: CBUUID(string: WatchBluetoothProtocol.notifyCharacteristicUUID),
+            properties: [.notify],
+            value: nil,
+            permissions: [.readable]
+        )
+        writeCharacteristic = write
+        notifyCharacteristic = notify
+        let service = CBMutableService(type: serviceUUID, primary: true)
+        service.characteristics = [write, notify]
+        manager.add(service)
+        manager.startAdvertising([
+            CBAdvertisementDataLocalNameKey: "无线麦",
+            CBAdvertisementDataServiceUUIDsKey: [serviceUUID],
+        ])
+        logger("WATCH BLE advertising")
+    }
+
+    private func receive(_ data: Data) {
+        if let chunk = WatchBluetoothAudioChunk.decode(data) {
+            receiveAudioChunk(chunk)
+            return
+        }
+        guard let message = try? JSONDecoder().decode(WatchBluetoothMessage.self, from: data) else {
+            logger("WATCH BLE rejected invalid packet bytes=\(data.count)")
+            return
+        }
+        handle(message)
+    }
+
+    private func handle(_ message: WatchBluetoothMessage) {
+        switch message.type {
+        case "hello":
+            handleHello(message)
+        case "command":
+            guard approved, let raw = message.command, let button = RemoteButton(rawValue: raw) else { return }
+            onCommand?(button) { [weak self] success in
+                if !success { self?.send(WatchBluetoothMessage(type: "error", detail: "command")) }
+            }
+        case "buttonEvent":
+            guard approved, let raw = message.command,
+                  let button = RemoteButton(rawValue: raw),
+                  let phaseRaw = message.buttonPhase,
+                  let phase = RemoteButtonPhase(rawValue: phaseRaw) else { return }
+            onButtonEvent?(button, phase) { [weak self] success in
+                if !success { self?.send(WatchBluetoothMessage(type: "error", detail: "button")) }
+            }
+        case "voiceStart":
+            guard approved, !voiceActive, let onVoiceStart else { return }
+            onVoiceStart { [weak self] success in
+                guard let self else { return }
+                queue.async {
+                    if success { self.voiceActive = true }
+                    else { self.send(WatchBluetoothMessage(type: "error", detail: "voice_start")) }
+                }
+            }
+        case "voiceStop":
+            guard approved else { return }
+            voiceActive = false
+            onVoiceStop?()
+        default:
+            break
+        }
+    }
+
+    private func handleHello(_ message: WatchBluetoothMessage) {
+        guard !requestedApproval else { return }
+        requestedApproval = true
+        identityFingerprint = fingerprint(for: message.identityPublicKey)
+        pendingPairingCode = String(format: "%02d", Int.random(in: 0..<100))
+        send(WatchBluetoothMessage(
+            type: "helloAck",
+            appVersion: Self.appVersion,
+            capabilities: [WatchBluetoothProtocol.buttonEventsCapability,
+                           WatchBluetoothProtocol.compressedAudioCapability],
+            pairingCode: pendingPairingCode
+        ))
+        if let fingerprint = identityFingerprint, isIdentityTrusted?(fingerprint) == true {
+            approve()
+            logger("WATCH BLE trusted_identity_approved")
+            return
+        }
+        onApprovalRequested?(message.deviceName ?? "Apple Watch", pendingPairingCode ?? "00", identityFingerprint) { [weak self] allowed in
+            self?.queue.async {
+                if allowed { self?.approve() } else { self?.deny() }
+            }
+        }
+    }
+
+    private func approve() {
+        guard requestedApproval else { return }
+        approved = true
+        pendingPairingCode = nil
+        sendReady()
+        logger("WATCH BLE approved")
+    }
+
+    private func deny() {
+        send(WatchBluetoothMessage(type: "denied"))
+        resetSession(notifyApproval: true)
+        logger("WATCH BLE denied")
+    }
+
+    private func sendReady() {
+        guard approved else { return }
+        send(WatchBluetoothMessage(
+            type: "ready",
+            deviceName: Self.macName,
+            appVersion: Self.appVersion,
+            buttonTitles: buttonTitles,
+            capabilities: [WatchBluetoothProtocol.buttonEventsCapability,
+                           WatchBluetoothProtocol.compressedAudioCapability]
+        ))
+    }
+
+    private func send(_ message: WatchBluetoothMessage) {
+        guard let manager, let characteristic = notifyCharacteristic,
+              subscribedCentral != nil,
+              let data = try? JSONEncoder().encode(message)
+        else { return }
+        _ = manager.updateValue(data, for: characteristic, onSubscribedCentrals: nil)
+    }
+
+    private func receiveAudioChunk(_ chunk: WatchBluetoothAudioChunk) {
+        guard approved, voiceActive else { return }
+        var frame = audioFrames[chunk.frameID] ?? AudioFrame(
+            chunkCount: chunk.chunkCount,
+            sampleCount: chunk.sampleCount,
+            chunks: [:]
+        )
+        guard frame.chunkCount == chunk.chunkCount, frame.sampleCount == chunk.sampleCount else { return }
+        frame.chunks[Int(chunk.chunkIndex)] = chunk.payload
+        audioFrames[chunk.frameID] = frame
+        guard frame.chunks.count == Int(frame.chunkCount) else { return }
+        let compressed = (0..<Int(frame.chunkCount)).compactMap { frame.chunks[$0] }
+            .reduce(into: Data()) { $0.append($1) }
+        audioFrames.removeValue(forKey: chunk.frameID)
+        guard let samples = WatchBluetoothADPCM.decode(compressed, sampleCount: Int(frame.sampleCount)) else { return }
+        onAudio?(samples)
+    }
+
+    private func resetSession(notifyApproval: Bool) {
+        if notifyApproval, requestedApproval { onApprovalCancelled?() }
+        approved = false
+        requestedApproval = false
+        voiceActive = false
+        identityFingerprint = nil
+        pendingPairingCode = nil
+        audioFrames.removeAll()
+        onButtonEventsReset?()
+        onVoiceStop?()
+    }
+
+    private func fingerprint(for encoded: String?) -> String? {
+        guard let encoded, let data = Data(base64Encoded: encoded) else { return nil }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static var macName: String { Host.current().localizedName ?? ProcessInfo.processInfo.hostName }
+    private static var appVersion: String? {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    }
+
+    private struct AudioFrame {
+        let chunkCount: UInt8
+        let sampleCount: UInt16
+        var chunks: [Int: Data]
+    }
+}
+
+extension WatchBluetoothRemoteServer: CBPeripheralManagerDelegate {
+    public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            logger("WATCH BLE state=\(peripheral.state.rawValue)")
+            if peripheral.state == .poweredOn { setupService() }
+        }
+    }
+
+    public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
+        for request in requests {
+            if let value = request.value { receive(value) }
+            peripheral.respond(to: request, withResult: .success)
+        }
+    }
+
+    public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            subscribedCentral = central
+            if approved { sendReady() }
+            logger("WATCH BLE subscribed")
+        }
+    }
+
+    public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard subscribedCentral?.identifier == central.identifier else { return }
+            subscribedCentral = nil
+            resetSession(notifyApproval: true)
+            logger("WATCH BLE unsubscribed")
+        }
+    }
+}
