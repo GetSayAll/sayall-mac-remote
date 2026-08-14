@@ -48,4 +48,21 @@ final class WatchBluetoothProtocolTests: XCTestCase {
         XCTAssertEqual(WatchBluetoothProtocol.writeCharacteristicUUID.count, 36)
         XCTAssertEqual(WatchBluetoothProtocol.notifyCharacteristicUUID.count, 36)
     }
+
+    func testBluetoothServerRetriesNotificationsWhenCoreBluetoothBackpressures() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SayAllMacRemoteCore/WatchBluetoothRemoteServer.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("private var pendingNotifications: [Data] = []"))
+        XCTAssertTrue(source.contains("private func drainNotifications()"))
+        XCTAssertTrue(source.contains("peripheralManagerIsReady(toUpdateSubscribers"))
+    }
 }

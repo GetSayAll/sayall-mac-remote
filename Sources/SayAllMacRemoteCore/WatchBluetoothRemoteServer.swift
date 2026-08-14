@@ -19,6 +19,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
     private var pendingPairingCode: String?
     private var buttonTitles: [String: String] = [:]
     private var audioFrames: [UInt16: AudioFrame] = [:]
+    private var pendingNotifications: [Data] = []
 
     public var onApprovalRequested: ApprovalHandler?
     public var onApprovalCancelled: (() -> Void)?
@@ -51,6 +52,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
             manager?.removeAllServices()
             manager = nil
             subscribedCentral = nil
+            pendingNotifications.removeAll()
             resetSession(notifyApproval: false)
             logger("WATCH BLE stopped")
         }
@@ -189,11 +191,22 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
     }
 
     private func send(_ message: WatchBluetoothMessage) {
+        guard let data = try? JSONEncoder().encode(message) else { return }
+        queue.async { [weak self] in
+            self?.pendingNotifications.append(data)
+            self?.drainNotifications()
+        }
+    }
+
+    private func drainNotifications() {
         guard let manager, let characteristic = notifyCharacteristic,
-              subscribedCentral != nil,
-              let data = try? JSONEncoder().encode(message)
-        else { return }
-        _ = manager.updateValue(data, for: characteristic, onSubscribedCentrals: nil)
+              subscribedCentral != nil else { return }
+        while let data = pendingNotifications.first {
+            guard manager.updateValue(data, for: characteristic, onSubscribedCentrals: nil) else {
+                return
+            }
+            pendingNotifications.removeFirst()
+        }
     }
 
     private func receiveAudioChunk(_ chunk: WatchBluetoothAudioChunk) {
@@ -222,6 +235,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
         identityFingerprint = nil
         pendingPairingCode = nil
         audioFrames.removeAll()
+        pendingNotifications.removeAll()
         onButtonEventsReset?()
         onVoiceStop?()
     }
@@ -264,6 +278,7 @@ extension WatchBluetoothRemoteServer: CBPeripheralManagerDelegate {
             guard let self else { return }
             subscribedCentral = central
             if approved { sendReady() }
+            drainNotifications()
             logger("WATCH BLE subscribed")
         }
     }
@@ -275,6 +290,12 @@ extension WatchBluetoothRemoteServer: CBPeripheralManagerDelegate {
             subscribedCentral = nil
             resetSession(notifyApproval: true)
             logger("WATCH BLE unsubscribed")
+        }
+    }
+
+    public func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
+        queue.async { [weak self] in
+            self?.drainNotifications()
         }
     }
 }
