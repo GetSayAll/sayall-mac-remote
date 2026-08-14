@@ -79,4 +79,21 @@ final class PhoneRemoteServerTests: XCTestCase {
             hasCurrentListener: false
         ))
     }
+
+    func testServerReportsAuthorizedConnectionLifecycle() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SayAllMacRemoteCore/PhoneRemoteServer.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("public var onConnectionStateChange: ((Bool) -> Void)?"))
+        XCTAssertTrue(source.contains("let isConnected = clients.values.contains { $0.hasApprovedSession }"))
+        XCTAssertTrue(source.contains("reportConnectionStateIfNeeded()"))
+    }
 }

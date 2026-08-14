@@ -76,6 +76,7 @@ public final class PhoneRemoteServer: @unchecked Sendable {
     private var registrationWatchdog: DispatchWorkItem?
     private var isServiceRegistered = false
     private var shouldRun = false
+    private var reportedConnectionState = false
     private let logger: LogHandler
 
     public var onApprovalRequested: ApprovalHandler?
@@ -88,6 +89,7 @@ public final class PhoneRemoteServer: @unchecked Sendable {
     public var onVoiceStartResult: ((@escaping (RemoteVoiceStartResult) -> Void) -> Void)?
     public var onVoiceStop: (() -> Void)?
     public var onAudio: (([Int16]) -> Void)?
+    public var onConnectionStateChange: ((Bool) -> Void)?
 
     public init(logger: @escaping LogHandler = { _ in }) {
         self.logger = logger
@@ -113,6 +115,7 @@ public final class PhoneRemoteServer: @unchecked Sendable {
             oldListener?.cancel()
             let activeClients = Array(clients.values)
             clients.removeAll()
+            reportConnectionStateIfNeeded()
             activeClients.forEach { $0.cancel() }
         }
     }
@@ -241,6 +244,7 @@ public final class PhoneRemoteServer: @unchecked Sendable {
                 )
             }
             supersededClients.forEach { $0.cancel() }
+            reportConnectionStateIfNeeded()
         }
         client.isIdentityTrusted = { [weak self] fingerprint in
             self?.isIdentityTrusted?(fingerprint) ?? false
@@ -298,8 +302,16 @@ public final class PhoneRemoteServer: @unchecked Sendable {
                 self?.onApprovalCancelled?()
             }
             self?.clients.removeValue(forKey: identifier)
+            self?.reportConnectionStateIfNeeded()
         }
         client.start()
+    }
+
+    private func reportConnectionStateIfNeeded() {
+        let isConnected = clients.values.contains { $0.hasApprovedSession }
+        guard isConnected != reportedConnectionState else { return }
+        reportedConnectionState = isConnected
+        onConnectionStateChange?(isConnected)
     }
 
     private static var macName: String {

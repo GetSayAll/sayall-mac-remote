@@ -13,6 +13,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
     private var notifyCharacteristic: CBMutableCharacteristic?
     private var subscribedCentral: CBCentral?
     private var approved = false
+    private var reportedConnectionState = false
     private var requestedApproval = false
     private var voiceActive = false
     private var identityFingerprint: String?
@@ -31,6 +32,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
     public var onVoiceStartResult: ((@escaping (RemoteVoiceStartResult) -> Void) -> Void)?
     public var onVoiceStop: (() -> Void)?
     public var onAudio: (([Int16]) -> Void)?
+    public var onConnectionStateChange: ((Bool) -> Void)?
 
     public init(logger: @escaping LogHandler = { _ in }) {
         self.logger = logger
@@ -174,6 +176,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
         approved = true
         pendingPairingCode = nil
         sendReady()
+        reportConnectionStateIfNeeded()
         logger("WATCH BLE approved")
     }
 
@@ -252,6 +255,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
     private func resetSession(notifyApproval: Bool) {
         if notifyApproval, requestedApproval { onApprovalCancelled?() }
         approved = false
+        reportConnectionStateIfNeeded()
         requestedApproval = false
         voiceActive = false
         identityFingerprint = nil
@@ -260,6 +264,12 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
         pendingNotifications.removeAll()
         onButtonEventsReset?()
         onVoiceStop?()
+    }
+
+    private func reportConnectionStateIfNeeded() {
+        guard approved != reportedConnectionState else { return }
+        reportedConnectionState = approved
+        onConnectionStateChange?(approved)
     }
 
     private func fingerprint(for encoded: String?) -> String? {

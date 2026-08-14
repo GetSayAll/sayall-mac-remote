@@ -81,4 +81,21 @@ final class WatchBluetoothProtocolTests: XCTestCase {
         XCTAssertTrue(source.contains("sendVoiceStartError(.busy)"))
         XCTAssertTrue(source.contains("onVoiceStartResult"))
     }
+
+    func testBluetoothServerReportsApprovedConnectionLifecycle() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SayAllMacRemoteCore/WatchBluetoothRemoteServer.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("public var onConnectionStateChange: ((Bool) -> Void)?"))
+        XCTAssertTrue(source.contains("reportedConnectionState = approved"))
+        XCTAssertTrue(source.contains("reportConnectionStateIfNeeded()"))
+    }
 }
