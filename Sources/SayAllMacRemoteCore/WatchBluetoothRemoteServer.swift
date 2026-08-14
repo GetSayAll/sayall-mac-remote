@@ -51,6 +51,8 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
             manager?.stopAdvertising()
             manager?.removeAllServices()
             manager = nil
+            writeCharacteristic = nil
+            notifyCharacteristic = nil
             subscribedCentral = nil
             pendingNotifications.removeAll()
             resetSession(notifyApproval: false)
@@ -67,7 +69,9 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
     }
 
     private func setupService() {
-        guard let manager, manager.state == .poweredOn else { return }
+        guard let manager, manager.state == .poweredOn,
+              writeCharacteristic == nil, notifyCharacteristic == nil
+        else { return }
         let serviceUUID = CBUUID(string: WatchBluetoothProtocol.serviceUUID)
         let write = CBMutableCharacteristic(
             type: CBUUID(string: WatchBluetoothProtocol.writeCharacteristicUUID),
@@ -86,11 +90,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
         let service = CBMutableService(type: serviceUUID, primary: true)
         service.characteristics = [write, notify]
         manager.add(service)
-        manager.startAdvertising([
-            CBAdvertisementDataLocalNameKey: "无线麦",
-            CBAdvertisementDataServiceUUIDsKey: [serviceUUID],
-        ])
-        logger("WATCH BLE advertising")
+        logger("WATCH BLE service_add_requested")
     }
 
     private func receive(_ data: Data) {
@@ -262,7 +262,49 @@ extension WatchBluetoothRemoteServer: CBPeripheralManagerDelegate {
         queue.async { [weak self] in
             guard let self else { return }
             logger("WATCH BLE state=\(peripheral.state.rawValue)")
-            if peripheral.state == .poweredOn { setupService() }
+            if peripheral.state == .poweredOn {
+                setupService()
+            } else {
+                writeCharacteristic = nil
+                notifyCharacteristic = nil
+            }
+        }
+    }
+
+    public func peripheralManager(
+        _ peripheral: CBPeripheralManager,
+        didAdd service: CBService,
+        error: Error?
+    ) {
+        queue.async { [weak self] in
+            guard let self,
+                  service.uuid == CBUUID(string: WatchBluetoothProtocol.serviceUUID)
+            else { return }
+            if let error {
+                logger("WATCH BLE service_add_failed error=\(error)")
+                writeCharacteristic = nil
+                notifyCharacteristic = nil
+                return
+            }
+            peripheral.startAdvertising([
+                CBAdvertisementDataLocalNameKey: "无线麦",
+                CBAdvertisementDataServiceUUIDsKey: [service.uuid],
+            ])
+            logger("WATCH BLE advertising_requested")
+        }
+    }
+
+    public func peripheralManagerDidStartAdvertising(
+        _ peripheral: CBPeripheralManager,
+        error: Error?
+    ) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            if let error {
+                logger("WATCH BLE advertising_failed error=\(error)")
+            } else {
+                logger("WATCH BLE advertising")
+            }
         }
     }
 

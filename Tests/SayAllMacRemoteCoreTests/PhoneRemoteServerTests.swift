@@ -3,6 +3,19 @@ import XCTest
 @testable import SayAllMacRemoteCore
 
 final class PhoneRemoteServerTests: XCTestCase {
+    func testServerConfirmsBonjourServicePublication() {
+        let published = expectation(description: "Bonjour service published")
+        let server = PhoneRemoteServer { message in
+            if message == "PHONE REMOTE service_published" {
+                published.fulfill()
+            }
+        }
+
+        server.start()
+        wait(for: [published], timeout: 8)
+        server.stop()
+    }
+
     func testAuthenticatedReconnectSafelyReplacesStaleSession() {
         XCTAssertTrue(PhoneRemoteServer.shouldReplaceExistingClient(
             existingIsApproved: false,
@@ -33,5 +46,28 @@ final class PhoneRemoteServerTests: XCTestCase {
         XCTAssertEqual(decoded.command, RemoteButton.power.rawValue)
         XCTAssertEqual(decoded.capabilities, [PhoneRemoteWireMessage.buttonEventsCapability])
         XCTAssertEqual(decoded.buttonPhase, RemoteButtonPhase.press.rawValue)
+    }
+
+    func testBonjourPublicationWatchdogOnlyRestartsCurrentUnpublishedListener() {
+        XCTAssertTrue(PhoneRemoteServer.shouldRestartAfterRegistrationTimeout(
+            isRunning: true,
+            isRegistered: false,
+            hasCurrentListener: true
+        ))
+        XCTAssertFalse(PhoneRemoteServer.shouldRestartAfterRegistrationTimeout(
+            isRunning: true,
+            isRegistered: true,
+            hasCurrentListener: true
+        ))
+        XCTAssertFalse(PhoneRemoteServer.shouldRestartAfterRegistrationTimeout(
+            isRunning: false,
+            isRegistered: false,
+            hasCurrentListener: true
+        ))
+        XCTAssertFalse(PhoneRemoteServer.shouldRestartAfterRegistrationTimeout(
+            isRunning: true,
+            isRegistered: false,
+            hasCurrentListener: false
+        ))
     }
 }

@@ -73,6 +73,9 @@ public final class PhoneRemoteServer: @unchecked Sendable {
     private var listener: NWListener?
     private var clients: [ObjectIdentifier: Client] = [:]
     private var buttonTitles: [String: String] = [:]
+    private var registrationWatchdog: DispatchWorkItem?
+    private var isServiceRegistered = false
+    private var shouldRun = false
     private let logger: LogHandler
 
     public var onApprovalRequested: ApprovalHandler?
@@ -91,15 +94,22 @@ public final class PhoneRemoteServer: @unchecked Sendable {
 
     public func start() {
         queue.async { [weak self] in
-            self?.startOnQueue()
+            guard let self else { return }
+            shouldRun = true
+            startOnQueue()
         }
     }
 
     public func stop() {
         queue.async { [weak self] in
             guard let self else { return }
-            listener?.cancel()
+            shouldRun = false
+            registrationWatchdog?.cancel()
+            registrationWatchdog = nil
+            isServiceRegistered = false
+            let oldListener = listener
             listener = nil
+            oldListener?.cancel()
             let activeClients = Array(clients.values)
             clients.removeAll()
             activeClients.forEach { $0.cancel() }
@@ -115,7 +125,7 @@ public final class PhoneRemoteServer: @unchecked Sendable {
     }
 
     private func startOnQueue() {
-        guard listener == nil else { return }
+        guard shouldRun, listener == nil else { return }
         do {
             let parameters = NWParameters.tcp
             parameters.includePeerToPeer = true
@@ -125,13 +135,34 @@ public final class PhoneRemoteServer: @unchecked Sendable {
                 type: "_remotemic._tcp"
             )
             listener.stateUpdateHandler = { [weak self] state in
+                guard let self, listener === self.listener else { return }
                 switch state {
                 case .ready:
-                    self?.logger("PHONE REMOTE listener_ready name=\(Self.macName)")
+                    logger("PHONE REMOTE listener_ready name=\(Self.macName)")
+                    scheduleRegistrationWatchdog(for: listener)
+                case let .waiting(error):
+                    logger("PHONE REMOTE listener_waiting error=\(error)")
                 case let .failed(error):
-                    self?.logger("PHONE REMOTE listener_failed error=\(error.localizedDescription)")
+                    logger("PHONE REMOTE listener_failed error=\(error)")
+                    restartListener(listener, reason: "listener_failed")
                 default:
                     break
+                }
+            }
+            listener.serviceRegistrationUpdateHandler = { [weak self] change in
+                guard let self, listener === self.listener else { return }
+                switch change {
+                case .add:
+                    isServiceRegistered = true
+                    registrationWatchdog?.cancel()
+                    registrationWatchdog = nil
+                    logger("PHONE REMOTE service_published")
+                case .remove:
+                    isServiceRegistered = false
+                    logger("PHONE REMOTE service_removed")
+                    restartListener(listener, reason: "service_removed")
+                @unknown default:
+                    logger("PHONE REMOTE service_registration_unknown")
                 }
             }
             listener.newConnectionHandler = { [weak self] connection in
@@ -142,6 +173,44 @@ public final class PhoneRemoteServer: @unchecked Sendable {
         } catch {
             logger("PHONE REMOTE listener_create_failed error=\(error.localizedDescription)")
         }
+    }
+
+    private func scheduleRegistrationWatchdog(for listener: NWListener) {
+        registrationWatchdog?.cancel()
+        let watchdog = DispatchWorkItem { [weak self, weak listener] in
+            guard let self, let listener,
+                  Self.shouldRestartAfterRegistrationTimeout(
+                    isRunning: shouldRun,
+                    isRegistered: isServiceRegistered,
+                    hasCurrentListener: listener === self.listener
+                  )
+            else { return }
+            logger("PHONE REMOTE service_publish_timeout")
+            restartListener(listener, reason: "service_publish_timeout")
+        }
+        registrationWatchdog = watchdog
+        queue.asyncAfter(deadline: .now() + 5, execute: watchdog)
+    }
+
+    private func restartListener(_ listener: NWListener, reason: String) {
+        guard shouldRun, listener === self.listener else { return }
+        registrationWatchdog?.cancel()
+        registrationWatchdog = nil
+        isServiceRegistered = false
+        self.listener = nil
+        listener.cancel()
+        logger("PHONE REMOTE listener_restart reason=\(reason)")
+        queue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.startOnQueue()
+        }
+    }
+
+    static func shouldRestartAfterRegistrationTimeout(
+        isRunning: Bool,
+        isRegistered: Bool,
+        hasCurrentListener: Bool
+    ) -> Bool {
+        isRunning && !isRegistered && hasCurrentListener
     }
 
     private func accept(_ connection: NWConnection) {
