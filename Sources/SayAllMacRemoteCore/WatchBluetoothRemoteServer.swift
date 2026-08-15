@@ -253,6 +253,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
     }
 
     private func resetSession(notifyApproval: Bool) {
+        let wasVoiceActive = voiceActive
         if notifyApproval, requestedApproval { onApprovalCancelled?() }
         approved = false
         reportConnectionStateIfNeeded()
@@ -263,7 +264,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
         audioFrames.removeAll()
         pendingNotifications.removeAll()
         onButtonEventsReset?()
-        onVoiceStop?()
+        if wasVoiceActive { onVoiceStop?() }
     }
 
     private func reportConnectionStateIfNeeded() {
@@ -271,6 +272,45 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
         reportedConnectionState = approved
         onConnectionStateChange?(approved)
     }
+
+    private func handlePeripheralState(_ state: CBManagerState) {
+        logger("WATCH BLE state=\(state.rawValue)")
+        if state == .poweredOn {
+            setupService()
+            return
+        }
+        writeCharacteristic = nil
+        notifyCharacteristic = nil
+        subscribedCentral = nil
+        resetSession(notifyApproval: true)
+    }
+
+#if DEBUG
+    func _testConfigureSession(approved: Bool, voiceActive: Bool) {
+        queue.sync {
+            self.approved = approved
+            reportedConnectionState = approved
+            requestedApproval = approved
+            self.voiceActive = voiceActive
+        }
+    }
+
+    func _testHandlePeripheralState(_ state: CBManagerState) {
+        queue.sync {
+            handlePeripheralState(state)
+        }
+    }
+
+    func _testSessionState() -> (
+        approved: Bool,
+        voiceActive: Bool,
+        hasSubscribedCentral: Bool
+    ) {
+        queue.sync {
+            (approved, voiceActive, subscribedCentral != nil)
+        }
+    }
+#endif
 
     private func fingerprint(for encoded: String?) -> String? {
         guard let encoded, let data = Data(base64Encoded: encoded) else { return nil }
@@ -292,14 +332,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
 extension WatchBluetoothRemoteServer: CBPeripheralManagerDelegate {
     public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
         queue.async { [weak self] in
-            guard let self else { return }
-            logger("WATCH BLE state=\(peripheral.state.rawValue)")
-            if peripheral.state == .poweredOn {
-                setupService()
-            } else {
-                writeCharacteristic = nil
-                notifyCharacteristic = nil
-            }
+            self?.handlePeripheralState(peripheral.state)
         }
     }
 
