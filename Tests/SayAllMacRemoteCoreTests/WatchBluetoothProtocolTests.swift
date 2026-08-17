@@ -48,6 +48,7 @@ final class WatchBluetoothProtocolTests: XCTestCase {
         XCTAssertEqual(WatchBluetoothProtocol.serviceUUID.count, 36)
         XCTAssertEqual(WatchBluetoothProtocol.writeCharacteristicUUID.count, 36)
         XCTAssertEqual(WatchBluetoothProtocol.notifyCharacteristicUUID.count, 36)
+        XCTAssertEqual(WatchBluetoothProtocol.voiceReadyCapability, "voiceReadyV1")
     }
 
     func testBluetoothServerRetriesNotificationsWhenCoreBluetoothBackpressures() throws {
@@ -121,5 +122,42 @@ final class WatchBluetoothProtocolTests: XCTestCase {
         XCTAssertEqual(connectionStates, [false])
         XCTAssertEqual(voiceStopCount, 1)
         XCTAssertEqual(approvalCancellationCount, 1)
+    }
+
+    func testVoiceReadyIsSentOnlyAfterMacVoiceStartupSucceeds() {
+        let server = WatchBluetoothRemoteServer()
+        server._testConfigureSession(approved: true, voiceActive: false)
+        server.onVoiceStartResult = { completion in completion(.started) }
+
+        server._testHandleMessage(WatchBluetoothMessage(type: "voiceStart"))
+
+        XCTAssertTrue(server._testSessionState().voiceActive)
+        XCTAssertEqual(server._testPendingNotifications().map(\.type), ["voiceReady"])
+    }
+
+    func testVoiceStartFailureDoesNotSendVoiceReady() {
+        let server = WatchBluetoothRemoteServer()
+        server._testConfigureSession(approved: true, voiceActive: false)
+        server.onVoiceStartResult = { completion in completion(.unavailable) }
+
+        server._testHandleMessage(WatchBluetoothMessage(type: "voiceStart"))
+
+        XCTAssertFalse(server._testSessionState().voiceActive)
+        XCTAssertEqual(server._testPendingNotifications().map(\.type), ["error"])
+    }
+
+    func testVoiceStopCancelsAStartWhoseMacCompletionArrivesLate() throws {
+        let server = WatchBluetoothRemoteServer()
+        server._testConfigureSession(approved: true, voiceActive: false)
+        var startCompletion: ((RemoteVoiceStartResult) -> Void)?
+        server.onVoiceStartResult = { completion in startCompletion = completion }
+
+        server._testHandleMessage(WatchBluetoothMessage(type: "voiceStart"))
+        server._testHandleMessage(WatchBluetoothMessage(type: "voiceStop"))
+        try XCTUnwrap(startCompletion)(.started)
+        server._testFlushQueue()
+
+        XCTAssertFalse(server._testSessionState().voiceActive)
+        XCTAssertTrue(server._testPendingNotifications().isEmpty)
     }
 }

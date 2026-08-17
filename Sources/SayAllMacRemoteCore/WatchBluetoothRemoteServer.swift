@@ -16,6 +16,8 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
     private var reportedConnectionState = false
     private var requestedApproval = false
     private var voiceActive = false
+    private var voiceStartPending = false
+    private var voiceStartGeneration: UInt64 = 0
     private var identityFingerprint: String?
     private var pendingPairingCode: String?
     private var buttonTitles: [String: String] = [:]
@@ -127,20 +129,35 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
             }
         case "voiceStart":
             guard approved else { return }
-            guard !voiceActive else {
+            guard !voiceActive, !voiceStartPending else {
                 sendVoiceStartError(.busy)
                 return
             }
+            voiceStartGeneration &+= 1
+            let generation = voiceStartGeneration
+            voiceStartPending = true
             requestVoiceStart { [weak self] result in
                 guard let self else { return }
                 queue.async {
-                    if result == .started { self.voiceActive = true }
-                    else { self.sendVoiceStartError(result) }
+                    guard self.approved,
+                          self.voiceStartPending,
+                          self.voiceStartGeneration == generation
+                    else { return }
+                    self.voiceStartPending = false
+                    if result == .started {
+                        self.voiceActive = true
+                        self.send(WatchBluetoothMessage(type: "voiceReady"))
+                    } else {
+                        self.sendVoiceStartError(result)
+                    }
                 }
             }
         case "voiceStop":
             guard approved else { return }
+            voiceStartGeneration &+= 1
+            voiceStartPending = false
             voiceActive = false
+            audioFrames.removeAll()
             onVoiceStop?()
         default:
             break
@@ -156,7 +173,8 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
             type: "helloAck",
             appVersion: Self.appVersion,
             capabilities: [WatchBluetoothProtocol.buttonEventsCapability,
-                           WatchBluetoothProtocol.compressedAudioCapability],
+                           WatchBluetoothProtocol.compressedAudioCapability,
+                           WatchBluetoothProtocol.voiceReadyCapability],
             pairingCode: pendingPairingCode
         ))
         if let fingerprint = identityFingerprint, isIdentityTrusted?(fingerprint) == true {
@@ -194,7 +212,8 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
             appVersion: Self.appVersion,
             buttonTitles: buttonTitles,
             capabilities: [WatchBluetoothProtocol.buttonEventsCapability,
-                           WatchBluetoothProtocol.compressedAudioCapability]
+                           WatchBluetoothProtocol.compressedAudioCapability,
+                           WatchBluetoothProtocol.voiceReadyCapability]
         ))
     }
 
@@ -253,11 +272,13 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
     }
 
     private func resetSession(notifyApproval: Bool) {
-        let wasVoiceActive = voiceActive
+        let wasVoiceActive = voiceActive || voiceStartPending
         if notifyApproval, requestedApproval { onApprovalCancelled?() }
         approved = false
         reportConnectionStateIfNeeded()
         requestedApproval = false
+        voiceStartGeneration &+= 1
+        voiceStartPending = false
         voiceActive = false
         identityFingerprint = nil
         pendingPairingCode = nil
@@ -292,7 +313,27 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
             reportedConnectionState = approved
             requestedApproval = approved
             self.voiceActive = voiceActive
+            voiceStartPending = false
         }
+    }
+
+    func _testHandleMessage(_ message: WatchBluetoothMessage) {
+        queue.sync { handle(message) }
+        queue.sync {}
+        queue.sync {}
+    }
+
+    func _testPendingNotifications() -> [WatchBluetoothMessage] {
+        queue.sync {
+            pendingNotifications.compactMap {
+                try? JSONDecoder().decode(WatchBluetoothMessage.self, from: $0)
+            }
+        }
+    }
+
+    func _testFlushQueue() {
+        queue.sync {}
+        queue.sync {}
     }
 
     func _testHandlePeripheralState(_ state: CBManagerState) {

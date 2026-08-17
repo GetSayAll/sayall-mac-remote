@@ -9,6 +9,7 @@ public enum WatchBluetoothProtocol {
     public static let audioChunkPayloadSize = 152
     public static let buttonEventsCapability = "buttonEventsV1"
     public static let compressedAudioCapability = "compressedAudioV1"
+    public static let voiceReadyCapability = "voiceReadyV1"
 }
 
 public struct WatchBluetoothMessage: Codable, Equatable {
