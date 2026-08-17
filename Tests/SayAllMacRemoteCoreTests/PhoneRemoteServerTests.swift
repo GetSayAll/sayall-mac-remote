@@ -48,6 +48,15 @@ final class PhoneRemoteServerTests: XCTestCase {
         XCTAssertEqual(decoded.buttonPhase, RemoteButtonPhase.press.rawValue)
     }
 
+    func testVoiceStartResultUsesStableErrorDetails() {
+        XCTAssertNil(RemoteVoiceStartResult.started.wireErrorDetail)
+        XCTAssertEqual(RemoteVoiceStartResult.busy.wireErrorDetail, "voice_busy")
+        XCTAssertEqual(
+            RemoteVoiceStartResult.unavailable.wireErrorDetail,
+            "voice_output_unavailable"
+        )
+    }
+
     func testBonjourPublicationWatchdogOnlyRestartsCurrentUnpublishedListener() {
         XCTAssertTrue(PhoneRemoteServer.shouldRestartAfterRegistrationTimeout(
             isRunning: true,
@@ -69,5 +78,22 @@ final class PhoneRemoteServerTests: XCTestCase {
             isRegistered: false,
             hasCurrentListener: false
         ))
+    }
+
+    func testServerReportsAuthorizedConnectionLifecycle() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SayAllMacRemoteCore/PhoneRemoteServer.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("public var onConnectionStateChange: ((Bool) -> Void)?"))
+        XCTAssertTrue(source.contains("let isConnected = clients.values.contains { $0.hasApprovedSession }"))
+        XCTAssertTrue(source.contains("reportConnectionStateIfNeeded()"))
     }
 }

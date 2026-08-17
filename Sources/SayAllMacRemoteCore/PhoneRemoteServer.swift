@@ -76,6 +76,7 @@ public final class PhoneRemoteServer: @unchecked Sendable {
     private var registrationWatchdog: DispatchWorkItem?
     private var isServiceRegistered = false
     private var shouldRun = false
+    private var reportedConnectionState = false
     private let logger: LogHandler
 
     public var onApprovalRequested: ApprovalHandler?
@@ -85,8 +86,10 @@ public final class PhoneRemoteServer: @unchecked Sendable {
     public var onButtonEvent: ((RemoteButton, RemoteButtonPhase, @escaping (Bool) -> Void) -> Void)?
     public var onButtonEventsReset: (() -> Void)?
     public var onVoiceStart: ((@escaping (Bool) -> Void) -> Void)?
+    public var onVoiceStartResult: ((@escaping (RemoteVoiceStartResult) -> Void) -> Void)?
     public var onVoiceStop: (() -> Void)?
     public var onAudio: (([Int16]) -> Void)?
+    public var onConnectionStateChange: ((Bool) -> Void)?
 
     public init(logger: @escaping LogHandler = { _ in }) {
         self.logger = logger
@@ -112,6 +115,7 @@ public final class PhoneRemoteServer: @unchecked Sendable {
             oldListener?.cancel()
             let activeClients = Array(clients.values)
             clients.removeAll()
+            reportConnectionStateIfNeeded()
             activeClients.forEach { $0.cancel() }
         }
     }
@@ -240,6 +244,7 @@ public final class PhoneRemoteServer: @unchecked Sendable {
                 )
             }
             supersededClients.forEach { $0.cancel() }
+            reportConnectionStateIfNeeded()
         }
         client.isIdentityTrusted = { [weak self] fingerprint in
             self?.isIdentityTrusted?(fingerprint) ?? false
@@ -271,11 +276,17 @@ public final class PhoneRemoteServer: @unchecked Sendable {
             handler(button, phase, completion)
         }
         client.onVoiceStart = { [weak self] completion in
-            guard let handler = self?.onVoiceStart else {
-                completion(false)
+            guard let self else {
+                completion(.unavailable)
                 return
             }
-            handler(completion)
+            if let handler = self.onVoiceStartResult {
+                handler(completion)
+            } else if let handler = self.onVoiceStart {
+                handler { completion($0 ? .started : .unavailable) }
+            } else {
+                completion(.unavailable)
+            }
         }
         client.onVoiceStop = { [weak self] in
             self?.onVoiceStop?()
@@ -291,8 +302,16 @@ public final class PhoneRemoteServer: @unchecked Sendable {
                 self?.onApprovalCancelled?()
             }
             self?.clients.removeValue(forKey: identifier)
+            self?.reportConnectionStateIfNeeded()
         }
         client.start()
+    }
+
+    private func reportConnectionStateIfNeeded() {
+        let isConnected = clients.values.contains { $0.hasApprovedSession }
+        guard isConnected != reportedConnectionState else { return }
+        reportedConnectionState = isConnected
+        onConnectionStateChange?(isConnected)
     }
 
     private static var macName: String {
@@ -326,7 +345,7 @@ private final class Client {
     var onApprovalRequested: ((String, String, String?) -> Void)?
     var onCommand: ((RemoteButton, @escaping (Bool) -> Void) -> Void)?
     var onButtonEvent: ((RemoteButton, RemoteButtonPhase, @escaping (Bool) -> Void) -> Void)?
-    var onVoiceStart: ((@escaping (Bool) -> Void) -> Void)?
+    var onVoiceStart: ((@escaping (RemoteVoiceStartResult) -> Void) -> Void)?
     var onVoiceStop: (() -> Void)?
     var onAudio: (([Int16]) -> Void)?
     var onApproved: (() -> Void)?
@@ -553,33 +572,24 @@ private final class Client {
             }
         case "voiceStart":
             guard !isVoiceActive, !isVoiceStarting else {
-                sendSecure(PhoneRemoteWireMessage(
-                    type: "error",
-                    detail: "Mac 的语音输出当前不可用。"
-                ))
+                sendVoiceStartError(.busy)
                 return
             }
             isVoiceStarting = true
             guard let onVoiceStart else {
                 isVoiceStarting = false
-                sendSecure(PhoneRemoteWireMessage(
-                    type: "error",
-                    detail: "Mac 的语音输出当前不可用。"
-                ))
+                sendVoiceStartError(.unavailable)
                 return
             }
-            onVoiceStart { [weak self] succeeded in
+            onVoiceStart { [weak self] result in
                 guard let self else { return }
                 queue.async {
                     guard self.isVoiceStarting else { return }
                     self.isVoiceStarting = false
-                    if succeeded {
+                    if result == .started {
                         self.isVoiceActive = true
                     } else {
-                        self.sendSecure(PhoneRemoteWireMessage(
-                            type: "error",
-                            detail: "Mac 的语音输出当前不可用。"
-                        ))
+                        self.sendVoiceStartError(result)
                     }
                 }
             }
@@ -602,6 +612,11 @@ private final class Client {
             type: "error",
             detail: "Mac 需要辅助功能权限，或该按键当前不可用。"
         ))
+    }
+
+    private func sendVoiceStartError(_ result: RemoteVoiceStartResult) {
+        guard let detail = result.wireErrorDetail else { return }
+        sendSecure(PhoneRemoteWireMessage(type: "error", detail: detail))
     }
 
     private func stopVoiceIfNeeded() {

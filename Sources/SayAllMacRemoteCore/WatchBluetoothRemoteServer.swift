@@ -13,8 +13,11 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
     private var notifyCharacteristic: CBMutableCharacteristic?
     private var subscribedCentral: CBCentral?
     private var approved = false
+    private var reportedConnectionState = false
     private var requestedApproval = false
     private var voiceActive = false
+    private var voiceStartPending = false
+    private var voiceStartGeneration: UInt64 = 0
     private var identityFingerprint: String?
     private var pendingPairingCode: String?
     private var buttonTitles: [String: String] = [:]
@@ -28,8 +31,10 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
     public var onButtonEvent: ((RemoteButton, RemoteButtonPhase, @escaping (Bool) -> Void) -> Void)?
     public var onButtonEventsReset: (() -> Void)?
     public var onVoiceStart: ((@escaping (Bool) -> Void) -> Void)?
+    public var onVoiceStartResult: ((@escaping (RemoteVoiceStartResult) -> Void) -> Void)?
     public var onVoiceStop: (() -> Void)?
     public var onAudio: (([Int16]) -> Void)?
+    public var onConnectionStateChange: ((Bool) -> Void)?
 
     public init(logger: @escaping LogHandler = { _ in }) {
         self.logger = logger
@@ -123,17 +128,36 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
                 if !success { self?.send(WatchBluetoothMessage(type: "error", detail: "button")) }
             }
         case "voiceStart":
-            guard approved, !voiceActive, let onVoiceStart else { return }
-            onVoiceStart { [weak self] success in
+            guard approved else { return }
+            guard !voiceActive, !voiceStartPending else {
+                sendVoiceStartError(.busy)
+                return
+            }
+            voiceStartGeneration &+= 1
+            let generation = voiceStartGeneration
+            voiceStartPending = true
+            requestVoiceStart { [weak self] result in
                 guard let self else { return }
                 queue.async {
-                    if success { self.voiceActive = true }
-                    else { self.send(WatchBluetoothMessage(type: "error", detail: "voice_start")) }
+                    guard self.approved,
+                          self.voiceStartPending,
+                          self.voiceStartGeneration == generation
+                    else { return }
+                    self.voiceStartPending = false
+                    if result == .started {
+                        self.voiceActive = true
+                        self.send(WatchBluetoothMessage(type: "voiceReady"))
+                    } else {
+                        self.sendVoiceStartError(result)
+                    }
                 }
             }
         case "voiceStop":
             guard approved else { return }
+            voiceStartGeneration &+= 1
+            voiceStartPending = false
             voiceActive = false
+            audioFrames.removeAll()
             onVoiceStop?()
         default:
             break
@@ -149,7 +173,8 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
             type: "helloAck",
             appVersion: Self.appVersion,
             capabilities: [WatchBluetoothProtocol.buttonEventsCapability,
-                           WatchBluetoothProtocol.compressedAudioCapability],
+                           WatchBluetoothProtocol.compressedAudioCapability,
+                           WatchBluetoothProtocol.voiceReadyCapability],
             pairingCode: pendingPairingCode
         ))
         if let fingerprint = identityFingerprint, isIdentityTrusted?(fingerprint) == true {
@@ -169,6 +194,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
         approved = true
         pendingPairingCode = nil
         sendReady()
+        reportConnectionStateIfNeeded()
         logger("WATCH BLE approved")
     }
 
@@ -186,8 +212,26 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
             appVersion: Self.appVersion,
             buttonTitles: buttonTitles,
             capabilities: [WatchBluetoothProtocol.buttonEventsCapability,
-                           WatchBluetoothProtocol.compressedAudioCapability]
+                           WatchBluetoothProtocol.compressedAudioCapability,
+                           WatchBluetoothProtocol.voiceReadyCapability]
         ))
+    }
+
+    private func requestVoiceStart(
+        completion: @escaping (RemoteVoiceStartResult) -> Void
+    ) {
+        if let onVoiceStartResult {
+            onVoiceStartResult(completion)
+        } else if let onVoiceStart {
+            onVoiceStart { completion($0 ? .started : .unavailable) }
+        } else {
+            completion(.unavailable)
+        }
+    }
+
+    private func sendVoiceStartError(_ result: RemoteVoiceStartResult) {
+        guard let detail = result.wireErrorDetail else { return }
+        send(WatchBluetoothMessage(type: "error", detail: detail))
     }
 
     private func send(_ message: WatchBluetoothMessage) {
@@ -228,17 +272,86 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
     }
 
     private func resetSession(notifyApproval: Bool) {
+        let wasVoiceActive = voiceActive || voiceStartPending
         if notifyApproval, requestedApproval { onApprovalCancelled?() }
         approved = false
+        reportConnectionStateIfNeeded()
         requestedApproval = false
+        voiceStartGeneration &+= 1
+        voiceStartPending = false
         voiceActive = false
         identityFingerprint = nil
         pendingPairingCode = nil
         audioFrames.removeAll()
         pendingNotifications.removeAll()
         onButtonEventsReset?()
-        onVoiceStop?()
+        if wasVoiceActive { onVoiceStop?() }
     }
+
+    private func reportConnectionStateIfNeeded() {
+        guard approved != reportedConnectionState else { return }
+        reportedConnectionState = approved
+        onConnectionStateChange?(approved)
+    }
+
+    private func handlePeripheralState(_ state: CBManagerState) {
+        logger("WATCH BLE state=\(state.rawValue)")
+        if state == .poweredOn {
+            setupService()
+            return
+        }
+        writeCharacteristic = nil
+        notifyCharacteristic = nil
+        subscribedCentral = nil
+        resetSession(notifyApproval: true)
+    }
+
+#if DEBUG
+    func _testConfigureSession(approved: Bool, voiceActive: Bool) {
+        queue.sync {
+            self.approved = approved
+            reportedConnectionState = approved
+            requestedApproval = approved
+            self.voiceActive = voiceActive
+            voiceStartPending = false
+        }
+    }
+
+    func _testHandleMessage(_ message: WatchBluetoothMessage) {
+        queue.sync { handle(message) }
+        queue.sync {}
+        queue.sync {}
+    }
+
+    func _testPendingNotifications() -> [WatchBluetoothMessage] {
+        queue.sync {
+            pendingNotifications.compactMap {
+                try? JSONDecoder().decode(WatchBluetoothMessage.self, from: $0)
+            }
+        }
+    }
+
+    func _testFlushQueue() {
+        queue.sync {}
+        queue.sync {}
+    }
+
+    func _testHandlePeripheralState(_ state: CBManagerState) {
+        queue.sync {
+            handlePeripheralState(state)
+        }
+    }
+
+    func _testSessionState() -> (
+        approved: Bool,
+        voiceActive: Bool,
+        hasSubscribedCentral: Bool
+    ) {
+        queue.sync {
+            (approved, voiceActive, subscribedCentral != nil)
+        }
+    }
+#endif
 
     private func fingerprint(for encoded: String?) -> String? {
         guard let encoded, let data = Data(base64Encoded: encoded) else { return nil }
@@ -260,14 +373,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
 extension WatchBluetoothRemoteServer: CBPeripheralManagerDelegate {
     public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
         queue.async { [weak self] in
-            guard let self else { return }
-            logger("WATCH BLE state=\(peripheral.state.rawValue)")
-            if peripheral.state == .poweredOn {
-                setupService()
-            } else {
-                writeCharacteristic = nil
-                notifyCharacteristic = nil
-            }
+            self?.handlePeripheralState(peripheral.state)
         }
     }
 
