@@ -3,6 +3,23 @@ import XCTest
 @testable import SayAllMacRemoteCore
 
 final class WatchBluetoothProtocolTests: XCTestCase {
+    private final class LogStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [String] = []
+
+        func append(_ value: String) {
+            lock.lock()
+            values.append(value)
+            lock.unlock()
+        }
+
+        func contains(_ predicate: (String) -> Bool) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return values.contains(where: predicate)
+        }
+    }
+
     func testADPCMCompressionRoundTripsFrame() throws {
         let source = (0..<800).map { index in
             Int16((index * 97) % 16000 - 8000)
@@ -33,6 +50,45 @@ final class WatchBluetoothProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.chunkCount, 4)
         XCTAssertEqual(decoded.sampleCount, 800)
         XCTAssertEqual(decoded.payload, chunk.payload)
+    }
+
+    func testAudioSignalMetricsDescribeNonSilentSamples() {
+        var metrics = WatchBluetoothAudioSignalMetrics()
+        metrics.append([0, 3, -4, 12, -12])
+
+        XCTAssertEqual(metrics.sampleCount, 5)
+        XCTAssertEqual(metrics.nonZeroSampleCount, 4)
+        XCTAssertEqual(metrics.peak, 12)
+        XCTAssertEqual(metrics.rms, 7)
+    }
+
+    func testBluetoothServerReassemblesDecodesAndReportsAudio() throws {
+        let logs = LogStore()
+        let server = WatchBluetoothRemoteServer { logs.append($0) }
+        server._testConfigureSession(approved: true, voiceActive: true)
+        let source = (0..<800).map { Int16(($0 * 41) % 12_000 - 6_000) }
+        let encoded = WatchBluetoothADPCM.encode(source)
+        let payloadSize = 152
+        let chunkCount = Int(ceil(Double(encoded.count) / Double(payloadSize)))
+        var received: [Int16] = []
+        server.onAudio = { received = $0 }
+
+        for index in 0..<chunkCount {
+            let start = index * payloadSize
+            let end = min(encoded.count, start + payloadSize)
+            server._testReceive(WatchBluetoothAudioChunk(
+                frameID: 7,
+                chunkIndex: UInt8(index),
+                chunkCount: UInt8(chunkCount),
+                sampleCount: UInt16(source.count),
+                payload: encoded[start..<end]
+            ).encoded())
+        }
+
+        XCTAssertEqual(received.count, source.count)
+        XCTAssertTrue(received.contains(where: { $0 != 0 }))
+        XCTAssertTrue(logs.contains { $0.contains("WATCH BLE AUDIO decoded frames=1") })
+        XCTAssertTrue(logs.contains { $0.contains("peak=") && $0.contains("rms=") })
     }
 
     func testBluetoothControlMessageUsesTheSharedServiceContract() throws {
@@ -100,6 +156,7 @@ final class WatchBluetoothProtocolTests: XCTestCase {
         XCTAssertTrue(source.contains("reportedConnectionState = approved"))
         XCTAssertTrue(source.contains("reportConnectionStateIfNeeded()"))
         XCTAssertTrue(source.contains("subscribedCentral = nil\n        resetSession(notifyApproval: true)"))
+        XCTAssertEqual(source.components(separatedBy: "peripheral.respond(to:").count - 1, 1)
     }
 
     func testBluetoothPowerLossClearsConnectionAndVoiceOnlyOnce() {

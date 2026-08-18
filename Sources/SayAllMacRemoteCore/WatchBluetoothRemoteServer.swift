@@ -23,6 +23,13 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
     private var buttonTitles: [String: String] = [:]
     private var audioFrames: [UInt16: AudioFrame] = [:]
     private var pendingNotifications: [Data] = []
+    private var audioPacketCount = 0
+    private var audioPacketByteCount = 0
+    private var audioFrameCount = 0
+    private var audioDecodeFailureCount = 0
+    private var audioDroppedInactiveCount = 0
+    private var audioMetadataMismatchCount = 0
+    private var audioSignalMetrics = WatchBluetoothAudioSignalMetrics()
 
     public var onApprovalRequested: ApprovalHandler?
     public var onApprovalCancelled: (() -> Void)?
@@ -145,6 +152,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
                     else { return }
                     self.voiceStartPending = false
                     if result == .started {
+                        self.resetAudioDiagnostics()
                         self.voiceActive = true
                         self.send(WatchBluetoothMessage(type: "voiceReady"))
                     } else {
@@ -156,6 +164,7 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
             guard approved else { return }
             voiceStartGeneration &+= 1
             voiceStartPending = false
+            logAudioSummary(reason: "voice_stop")
             voiceActive = false
             audioFrames.removeAll()
             onVoiceStop?()
@@ -254,25 +263,85 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
     }
 
     private func receiveAudioChunk(_ chunk: WatchBluetoothAudioChunk) {
-        guard approved, voiceActive else { return }
+        guard approved, voiceActive else {
+            audioDroppedInactiveCount += 1
+            if audioDroppedInactiveCount == 1 {
+                logger(
+                    "WATCH BLE AUDIO dropped reason=inactive frame=\(chunk.frameID) " +
+                        "approved=\(approved) voice_active=\(voiceActive)"
+                )
+            }
+            return
+        }
+        audioPacketCount += 1
+        audioPacketByteCount += chunk.payload.count + 9
         var frame = audioFrames[chunk.frameID] ?? AudioFrame(
             chunkCount: chunk.chunkCount,
             sampleCount: chunk.sampleCount,
             chunks: [:]
         )
-        guard frame.chunkCount == chunk.chunkCount, frame.sampleCount == chunk.sampleCount else { return }
+        guard frame.chunkCount == chunk.chunkCount, frame.sampleCount == chunk.sampleCount else {
+            audioMetadataMismatchCount += 1
+            logger(
+                "WATCH BLE AUDIO dropped reason=metadata frame=\(chunk.frameID) " +
+                    "chunk=\(chunk.chunkIndex)/\(chunk.chunkCount) samples=\(chunk.sampleCount)"
+            )
+            return
+        }
         frame.chunks[Int(chunk.chunkIndex)] = chunk.payload
         audioFrames[chunk.frameID] = frame
         guard frame.chunks.count == Int(frame.chunkCount) else { return }
         let compressed = (0..<Int(frame.chunkCount)).compactMap { frame.chunks[$0] }
             .reduce(into: Data()) { $0.append($1) }
         audioFrames.removeValue(forKey: chunk.frameID)
-        guard let samples = WatchBluetoothADPCM.decode(compressed, sampleCount: Int(frame.sampleCount)) else { return }
+        guard let samples = WatchBluetoothADPCM.decode(compressed, sampleCount: Int(frame.sampleCount)) else {
+            audioDecodeFailureCount += 1
+            logger(
+                "WATCH BLE AUDIO dropped reason=decode frame=\(chunk.frameID) " +
+                    "compressed_bytes=\(compressed.count) samples=\(frame.sampleCount)"
+            )
+            return
+        }
+        audioFrameCount += 1
+        audioSignalMetrics.append(samples)
+        if audioFrameCount == 1 || audioFrameCount.isMultiple(of: 20) {
+            logger(
+                "WATCH BLE AUDIO decoded frames=\(audioFrameCount) packets=\(audioPacketCount) " +
+                    "bytes=\(audioPacketByteCount) samples=\(audioSignalMetrics.sampleCount) " +
+                    "nonzero=\(audioSignalMetrics.nonZeroSampleCount) peak=\(audioSignalMetrics.peak) " +
+                    "rms=\(audioSignalMetrics.rms) pending_frames=\(audioFrames.count)"
+            )
+        }
         onAudio?(samples)
+    }
+
+    private func resetAudioDiagnostics() {
+        audioFrames.removeAll()
+        audioPacketCount = 0
+        audioPacketByteCount = 0
+        audioFrameCount = 0
+        audioDecodeFailureCount = 0
+        audioDroppedInactiveCount = 0
+        audioMetadataMismatchCount = 0
+        audioSignalMetrics = WatchBluetoothAudioSignalMetrics()
+    }
+
+    private func logAudioSummary(reason: String) {
+        logger(
+            "WATCH BLE AUDIO summary reason=\(reason) frames=\(audioFrameCount) " +
+                "packets=\(audioPacketCount) bytes=\(audioPacketByteCount) " +
+                "samples=\(audioSignalMetrics.sampleCount) " +
+                "nonzero=\(audioSignalMetrics.nonZeroSampleCount) peak=\(audioSignalMetrics.peak) " +
+                "rms=\(audioSignalMetrics.rms) decode_failures=\(audioDecodeFailureCount) " +
+                "inactive_drops=\(audioDroppedInactiveCount) " +
+                "metadata_mismatches=\(audioMetadataMismatchCount) " +
+                "pending_frames=\(audioFrames.count)"
+        )
     }
 
     private func resetSession(notifyApproval: Bool) {
         let wasVoiceActive = voiceActive || voiceStartPending
+        if voiceActive { logAudioSummary(reason: "session_reset") }
         if notifyApproval, requestedApproval { onApprovalCancelled?() }
         approved = false
         reportConnectionStateIfNeeded()
@@ -321,6 +390,10 @@ public final class WatchBluetoothRemoteServer: NSObject, @unchecked Sendable {
         queue.sync { handle(message) }
         queue.sync {}
         queue.sync {}
+    }
+
+    func _testReceive(_ data: Data) {
+        queue.sync { receive(data) }
     }
 
     func _testPendingNotifications() -> [WatchBluetoothMessage] {
@@ -415,10 +488,14 @@ extension WatchBluetoothRemoteServer: CBPeripheralManagerDelegate {
     }
 
     public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
+        guard let responseRequest = requests.first else { return }
         for request in requests {
             if let value = request.value { receive(value) }
-            peripheral.respond(to: request, withResult: .success)
         }
+        if requests.count > 1 {
+            logger("WATCH BLE write_batch requests=\(requests.count)")
+        }
+        peripheral.respond(to: responseRequest, withResult: .success)
     }
 
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {

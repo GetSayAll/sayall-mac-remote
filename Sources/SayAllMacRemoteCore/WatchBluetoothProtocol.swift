@@ -85,6 +85,30 @@ public struct WatchBluetoothAudioChunk {
     }
 }
 
+public struct WatchBluetoothAudioSignalMetrics: Equatable, Sendable {
+    public private(set) var sampleCount = 0
+    public private(set) var nonZeroSampleCount = 0
+    public private(set) var peak = 0
+    public private(set) var squaredSampleSum: UInt64 = 0
+
+    public init() {}
+
+    public var rms: Int {
+        guard sampleCount > 0 else { return 0 }
+        return Int(sqrt(Double(squaredSampleSum) / Double(sampleCount)))
+    }
+
+    public mutating func append(_ samples: [Int16]) {
+        for sample in samples {
+            let magnitude = abs(Int(sample))
+            sampleCount += 1
+            if sample != 0 { nonZeroSampleCount += 1 }
+            peak = max(peak, magnitude)
+            squaredSampleSum += UInt64(magnitude * magnitude)
+        }
+    }
+}
+
 public enum WatchBluetoothADPCM {
     private static let indexTable = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8]
     private static let stepTable = [7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767]
