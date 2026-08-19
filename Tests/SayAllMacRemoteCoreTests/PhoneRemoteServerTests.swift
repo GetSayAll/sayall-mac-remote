@@ -96,4 +96,124 @@ final class PhoneRemoteServerTests: XCTestCase {
         XCTAssertTrue(source.contains("let isConnected = clients.values.contains { $0.hasApprovedSession }"))
         XCTAssertTrue(source.contains("reportConnectionStateIfNeeded()"))
     }
+
+    func testInvitationURLRoundTripsWithoutExposingItInLogs() throws {
+        let invitation = PhoneRemoteInvitation(
+            listenerID: "listener-1",
+            invitationID: "invite-1",
+            token: "secret-token",
+            hosts: ["192.168.1.20", "fe80::1%en0"],
+            port: 54321,
+            expiresAt: Date(timeIntervalSince1970: 2_000_000_000)
+        )
+        let url = try XCTUnwrap(invitation.url)
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let items = components.queryItems ?? []
+
+        XCTAssertEqual(url.scheme, "sayall")
+        XCTAssertEqual(url.host, "connect")
+        XCTAssertEqual(items.first(where: { $0.name == "listener" })?.value, "listener-1")
+        XCTAssertEqual(items.first(where: { $0.name == "invite" })?.value, "invite-1")
+        XCTAssertEqual(items.first(where: { $0.name == "token" })?.value, "secret-token")
+        XCTAssertEqual(items.filter { $0.name == "host" }.compactMap(\.value), invitation.hosts)
+    }
+
+    func testWatchAndOldIOSRemainLegacyCompatibleWithoutInvitationFields() {
+        XCTAssertEqual(
+            PhoneRemoteInvitationAccess.evaluate(
+                listenerID: nil,
+                invitationID: nil,
+                invitationToken: nil,
+                identityIsTrusted: false,
+                currentListenerID: "listener-1",
+                invitation: nil
+            ),
+            .legacy
+        )
+    }
+
+    func testScannedInvitationAndCurrentCycleCacheAreAccepted() {
+        let invitation = PhoneRemoteInvitation(
+            listenerID: "listener-1",
+            invitationID: "invite-1",
+            token: "secret-token",
+            hosts: ["192.168.1.20"],
+            port: 54321,
+            expiresAt: Date(timeIntervalSince1970: 2_000_000_000)
+        )
+        let now = Date(timeIntervalSince1970: 1_900_000_000)
+
+        XCTAssertEqual(
+            PhoneRemoteInvitationAccess.evaluate(
+                listenerID: "listener-1",
+                invitationID: "invite-1",
+                invitationToken: "secret-token",
+                identityIsTrusted: false,
+                currentListenerID: "listener-1",
+                invitation: invitation,
+                now: now
+            ),
+            .invited
+        )
+        XCTAssertEqual(
+            PhoneRemoteInvitationAccess.evaluate(
+                listenerID: "listener-1",
+                invitationID: nil,
+                invitationToken: nil,
+                identityIsTrusted: true,
+                currentListenerID: "listener-1",
+                invitation: invitation,
+                now: now
+            ),
+            .cached
+        )
+    }
+
+    func testWrongCycleExpiredAndUntrustedCacheAreRejected() {
+        let invitation = PhoneRemoteInvitation(
+            listenerID: "listener-1",
+            invitationID: "invite-1",
+            token: "secret-token",
+            hosts: ["192.168.1.20"],
+            port: 54321,
+            expiresAt: Date(timeIntervalSince1970: 100)
+        )
+
+        XCTAssertEqual(
+            PhoneRemoteInvitationAccess.evaluate(
+                listenerID: "old-listener",
+                invitationID: "invite-1",
+                invitationToken: "secret-token",
+                identityIsTrusted: true,
+                currentListenerID: "listener-1",
+                invitation: invitation,
+                now: Date(timeIntervalSince1970: 50)
+            ),
+            .denied
+        )
+        XCTAssertEqual(
+            PhoneRemoteInvitationAccess.evaluate(
+                listenerID: "listener-1",
+                invitationID: "invite-1",
+                invitationToken: "secret-token",
+                identityIsTrusted: false,
+                currentListenerID: "listener-1",
+                invitation: invitation,
+                now: Date(timeIntervalSince1970: 101)
+            ),
+            .denied
+        )
+        XCTAssertEqual(
+            PhoneRemoteInvitationAccess.evaluate(
+                listenerID: "listener-1",
+                invitationID: nil,
+                invitationToken: nil,
+                identityIsTrusted: false,
+                currentListenerID: "listener-1",
+                invitation: invitation,
+                now: Date(timeIntervalSince1970: 50)
+            ),
+            .denied
+        )
+    }
 }
