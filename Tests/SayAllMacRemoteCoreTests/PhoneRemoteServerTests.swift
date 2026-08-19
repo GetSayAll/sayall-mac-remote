@@ -216,4 +216,17 @@ final class PhoneRemoteServerTests: XCTestCase {
             .denied
         )
     }
+
+    func testInvitationAddressesRemainLocalNetworkOnly() {
+        XCTAssertTrue(PhoneRemoteInterfaceAddresses.isLocalAddress("192.168.1.20"))
+        XCTAssertTrue(PhoneRemoteInterfaceAddresses.isLocalAddress("10.0.0.8"))
+        XCTAssertTrue(PhoneRemoteInterfaceAddresses.isLocalAddress("172.16.5.4"))
+        XCTAssertTrue(PhoneRemoteInterfaceAddresses.isLocalAddress("100.64.1.2"))
+        XCTAssertTrue(PhoneRemoteInterfaceAddresses.isLocalAddress("169.254.20.3"))
+        XCTAssertTrue(PhoneRemoteInterfaceAddresses.isLocalAddress("fe80::1%en0"))
+        XCTAssertTrue(PhoneRemoteInterfaceAddresses.isLocalAddress("fd12:3456::8"))
+        XCTAssertFalse(PhoneRemoteInterfaceAddresses.isLocalAddress("8.8.8.8"))
+        XCTAssertFalse(PhoneRemoteInterfaceAddresses.isLocalAddress("2001:4860:4860::8888"))
+        XCTAssertFalse(PhoneRemoteInterfaceAddresses.isLocalAddress("example.com"))
+    }
 }

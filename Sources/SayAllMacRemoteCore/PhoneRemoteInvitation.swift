@@ -140,6 +140,7 @@ enum PhoneRemoteInterfaceAddresses {
             if family == AF_INET6, value.hasPrefix("fe80:"), !value.contains("%") {
                 value += "%\(name)"
             }
+            guard isLocalAddress(value) else { continue }
             addresses.append((family, value))
         }
 
@@ -160,6 +161,24 @@ enum PhoneRemoteInterfaceAddresses {
               flags & UInt32(IFF_LOOPBACK) == 0
         else { return false }
         return name.hasPrefix("en") || name.hasPrefix("bridge")
+    }
+
+    static func isLocalAddress(_ value: String) -> Bool {
+        if let address = IPv4Address(value) {
+            let bytes = [UInt8](address.rawValue)
+            guard bytes.count == 4 else { return false }
+            return bytes[0] == 10
+                || (bytes[0] == 172 && (16...31).contains(bytes[1]))
+                || (bytes[0] == 192 && bytes[1] == 168)
+                || (bytes[0] == 169 && bytes[1] == 254)
+                || (bytes[0] == 100 && (64...127).contains(bytes[1]))
+        }
+        let addressPart = value.split(separator: "%", maxSplits: 1).first.map(String.init) ?? value
+        guard let address = IPv6Address(addressPart) else { return false }
+        let bytes = [UInt8](address.rawValue)
+        guard bytes.count == 16 else { return false }
+        return bytes[0] & 0xFE == 0xFC
+            || (bytes[0] == 0xFE && bytes[1] & 0xC0 == 0x80)
     }
 }
 
