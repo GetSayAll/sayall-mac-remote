@@ -18,6 +18,9 @@ struct PhoneRemoteWireMessage: Codable {
     var payload: String?
     var capabilities: [String]?
     var buttonPhase: String?
+    var listenerID: String?
+    var invitationID: String?
+    var invitationToken: String?
 }
 
 enum PhoneRemoteIdentityVerification: Equatable {
@@ -77,6 +80,9 @@ public final class PhoneRemoteServer: @unchecked Sendable {
     private var isServiceRegistered = false
     private var shouldRun = false
     private var reportedConnectionState = false
+    private var listenerID: String?
+    private var invitation: PhoneRemoteInvitation?
+    private var invitationRefresh: DispatchWorkItem?
     private let logger: LogHandler
 
     public var onApprovalRequested: ApprovalHandler?
@@ -90,6 +96,7 @@ public final class PhoneRemoteServer: @unchecked Sendable {
     public var onVoiceStop: (() -> Void)?
     public var onAudio: (([Int16]) -> Void)?
     public var onConnectionStateChange: ((Bool) -> Void)?
+    public var onInvitationChange: ((PhoneRemoteInvitation?) -> Void)?
 
     public init(logger: @escaping LogHandler = { _ in }) {
         self.logger = logger
@@ -109,7 +116,11 @@ public final class PhoneRemoteServer: @unchecked Sendable {
             shouldRun = false
             registrationWatchdog?.cancel()
             registrationWatchdog = nil
+            invitationRefresh?.cancel()
+            invitationRefresh = nil
             isServiceRegistered = false
+            listenerID = nil
+            setInvitation(nil)
             let oldListener = listener
             listener = nil
             oldListener?.cancel()
@@ -131,6 +142,7 @@ public final class PhoneRemoteServer: @unchecked Sendable {
     private func startOnQueue() {
         guard shouldRun, listener == nil else { return }
         do {
+            listenerID = UUID().uuidString.lowercased()
             let parameters = NWParameters.tcp
             parameters.includePeerToPeer = true
             let listener = try NWListener(using: parameters)
@@ -143,6 +155,7 @@ public final class PhoneRemoteServer: @unchecked Sendable {
                 switch state {
                 case .ready:
                     logger("PHONE REMOTE listener_ready name=\(Self.macName)")
+                    publishInvitation(for: listener)
                     scheduleRegistrationWatchdog(for: listener)
                 case let .waiting(error):
                     logger("PHONE REMOTE listener_waiting error=\(error)")
@@ -200,7 +213,10 @@ public final class PhoneRemoteServer: @unchecked Sendable {
         guard shouldRun, listener === self.listener else { return }
         registrationWatchdog?.cancel()
         registrationWatchdog = nil
+        invitationRefresh?.cancel()
+        invitationRefresh = nil
         isServiceRegistered = false
+        setInvitation(nil)
         self.listener = nil
         listener.cancel()
         logger("PHONE REMOTE listener_restart reason=\(reason)")
@@ -215,6 +231,88 @@ public final class PhoneRemoteServer: @unchecked Sendable {
         hasCurrentListener: Bool
     ) -> Bool {
         isRunning && !isRegistered && hasCurrentListener
+    }
+
+    private func publishInvitation(for listener: NWListener) {
+        guard shouldRun,
+              listener === self.listener,
+              let listenerID,
+              let port = listener.port?.rawValue
+        else {
+            setInvitation(nil)
+            return
+        }
+        let hosts = PhoneRemoteInterfaceAddresses.current()
+        guard !hosts.isEmpty else {
+            logger("PHONE REMOTE invitation_unavailable reason=no_local_address")
+            setInvitation(nil)
+            return
+        }
+        let invitation = PhoneRemoteInvitation.make(
+            listenerID: listenerID,
+            hosts: hosts,
+            port: port
+        )
+        setInvitation(invitation)
+        logger("PHONE REMOTE invitation_ready hosts=\(hosts.count)")
+        scheduleInvitationRefresh(for: listener, invitation: invitation)
+    }
+
+    private func scheduleInvitationRefresh(
+        for listener: NWListener,
+        invitation: PhoneRemoteInvitation
+    ) {
+        invitationRefresh?.cancel()
+        let refresh = DispatchWorkItem { [weak self, weak listener] in
+            guard let self,
+                  let listener,
+                  listener === self.listener,
+                  self.invitation?.invitationID == invitation.invitationID
+            else { return }
+            publishInvitation(for: listener)
+        }
+        invitationRefresh = refresh
+        let delay = max(1, invitation.expiresAt.timeIntervalSinceNow)
+        queue.asyncAfter(deadline: .now() + delay, execute: refresh)
+    }
+
+    private func setInvitation(_ invitation: PhoneRemoteInvitation?) {
+        self.invitation = invitation
+        onInvitationChange?(invitation)
+    }
+
+    private func authorizeDirectConnection(
+        listenerID: String?,
+        invitationID: String?,
+        invitationToken: String?,
+        identityFingerprint: String?
+    ) -> Bool {
+        let access = PhoneRemoteInvitationAccess.evaluate(
+            listenerID: listenerID,
+            invitationID: invitationID,
+            invitationToken: invitationToken,
+            identityIsTrusted: identityFingerprint.map {
+                isIdentityTrusted?($0) == true
+            } ?? false,
+            currentListenerID: self.listenerID,
+            invitation: invitation
+        )
+        switch access {
+        case .legacy, .cached:
+            return true
+        case .invited:
+            invitationRefresh?.cancel()
+            invitationRefresh = nil
+            if let listener {
+                publishInvitation(for: listener)
+            } else {
+                setInvitation(nil)
+            }
+            return true
+        case .denied:
+            logger("PHONE REMOTE direct_invitation_rejected")
+            return false
+        }
     }
 
     private func accept(_ connection: NWConnection) {
@@ -248,6 +346,14 @@ public final class PhoneRemoteServer: @unchecked Sendable {
         }
         client.isIdentityTrusted = { [weak self] fingerprint in
             self?.isIdentityTrusted?(fingerprint) ?? false
+        }
+        client.authorizeDirectConnection = { [weak self] listenerID, invitationID, token, fingerprint in
+            self?.authorizeDirectConnection(
+                listenerID: listenerID,
+                invitationID: invitationID,
+                invitationToken: token,
+                identityFingerprint: fingerprint
+            ) ?? false
         }
         client.onApprovalRequested = { [weak self, weak client] deviceName, pairingCode, fingerprint in
             guard let self, let client else { return }
@@ -342,6 +448,7 @@ private final class Client {
     private var buttonTitles: [String: String]
 
     var isIdentityTrusted: ((String) -> Bool)?
+    var authorizeDirectConnection: ((String?, String?, String?, String?) -> Bool)?
     var onApprovalRequested: ((String, String, String?) -> Void)?
     var onCommand: ((RemoteButton, @escaping (Bool) -> Void) -> Void)?
     var onButtonEvent: ((RemoteButton, RemoteButtonPhase, @escaping (Bool) -> Void) -> Void)?
@@ -485,6 +592,15 @@ private final class Client {
             identityFingerprint = fingerprint
             waitsForPairingReady = true
         case .invalid:
+            connection.cancel()
+            return
+        }
+        guard authorizeDirectConnection?(
+            message.listenerID,
+            message.invitationID,
+            message.invitationToken,
+            identityFingerprint
+        ) != false else {
             connection.cancel()
             return
         }
