@@ -5,6 +5,7 @@ import Network
 
 public struct PhoneRemoteInvitation: Equatable, Sendable {
     public static let formatVersion = 1
+    public static let maximumHostCount = 8
     public static let validityDuration: TimeInterval = 10 * 60
 
     public let listenerID: String
@@ -25,7 +26,7 @@ public struct PhoneRemoteInvitation: Equatable, Sendable {
         self.listenerID = listenerID
         self.invitationID = invitationID
         self.token = token
-        self.hosts = hosts
+        self.hosts = PhoneRemoteInterfaceAddresses.invitationCandidates(from: hosts)
         self.port = port
         self.expiresAt = expiresAt
     }
@@ -107,6 +108,22 @@ enum PhoneRemoteInvitationAccess: Equatable {
 }
 
 enum PhoneRemoteInterfaceAddresses {
+    static func invitationCandidates(from addresses: [String]) -> [String] {
+        var seen = Set<String>()
+        return addresses
+            .enumerated()
+            .filter { isLocalAddress($0.element) && seen.insert($0.element).inserted }
+            .sorted { lhs, rhs in
+                let lhsPriority = invitationPriority(lhs.element)
+                let rhsPriority = invitationPriority(rhs.element)
+                return lhsPriority == rhsPriority
+                    ? lhs.offset < rhs.offset
+                    : lhsPriority < rhsPriority
+            }
+            .prefix(PhoneRemoteInvitation.maximumHostCount)
+            .map(\.element)
+    }
+
     static func current() -> [String] {
         var firstAddress: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&firstAddress) == 0, let firstAddress else { return [] }
@@ -179,6 +196,17 @@ enum PhoneRemoteInterfaceAddresses {
         guard bytes.count == 16 else { return false }
         return bytes[0] & 0xFE == 0xFC
             || (bytes[0] == 0xFE && bytes[1] & 0xC0 == 0x80)
+    }
+
+    private static func invitationPriority(_ value: String) -> Int {
+        if let address = IPv4Address(value) {
+            let bytes = [UInt8](address.rawValue)
+            return bytes.count == 4 && bytes[0] == 169 && bytes[1] == 254 ? 2 : 0
+        }
+        let addressPart = value.split(separator: "%", maxSplits: 1).first.map(String.init) ?? value
+        guard let address = IPv6Address(addressPart) else { return 4 }
+        let bytes = [UInt8](address.rawValue)
+        return bytes.count == 16 && bytes[0] == 0xFE && bytes[1] & 0xC0 == 0x80 ? 3 : 1
     }
 }
 

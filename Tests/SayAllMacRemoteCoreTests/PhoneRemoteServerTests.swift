@@ -118,6 +118,43 @@ final class PhoneRemoteServerTests: XCTestCase {
         XCTAssertEqual(items.filter { $0.name == "host" }.compactMap(\.value), invitation.hosts)
     }
 
+    func testGeneratedInvitationRespectsClientHostLimitAndKeepsPreferredLocalAddresses() {
+        let hosts = [
+            "169.254.20.3",
+            "fe80::1%en0",
+            "192.168.1.20",
+            "10.0.0.8",
+            "172.16.5.4",
+            "100.64.1.2",
+            "fd12:3456::8",
+            "192.168.1.21",
+            "10.0.0.9",
+            "172.16.5.5",
+        ]
+
+        let invitation = PhoneRemoteInvitation.make(
+            listenerID: "listener-1",
+            hosts: hosts,
+            port: 54321,
+            now: Date(timeIntervalSince1970: 2_000_000_000)
+        )
+
+        XCTAssertLessThanOrEqual(invitation.hosts.count, 8)
+        XCTAssertEqual(
+            invitation.hosts,
+            [
+                "192.168.1.20",
+                "10.0.0.8",
+                "172.16.5.4",
+                "100.64.1.2",
+                "192.168.1.21",
+                "10.0.0.9",
+                "172.16.5.5",
+                "fd12:3456::8",
+            ]
+        )
+    }
+
     func testWatchAndOldIOSRemainLegacyCompatibleWithoutInvitationFields() {
         XCTAssertEqual(
             PhoneRemoteInvitationAccess.evaluate(
